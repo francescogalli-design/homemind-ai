@@ -24,10 +24,9 @@ class HomeMindCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=60),
         )
 
-    async def _async_update_data(self) -> dict:
+    async def _async_update_data(self):
         """Update data via API."""
         try:
-            # Mock data for now
             return {
                 "status": "online",
                 "last_update": self.hass.config.time_zone_now().isoformat(),

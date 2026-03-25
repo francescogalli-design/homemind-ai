@@ -4,7 +4,6 @@ import logging
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_URL
 
 from .const import DOMAIN, CONF_API_URL
 

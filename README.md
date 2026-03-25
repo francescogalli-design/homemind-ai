@@ -1,70 +1,20 @@
-# 🏠 HomeMind AI Assistant - HACS Integration
+# HomeMind AI
 
-## 📦 Installazione Tramite HACS
+HomeMind AI integration for Home Assistant.
 
-### Prerequisiti
-- Home Assistant 2024.1+
-- HACS installato
+## Installation
 
-### Installazione
+1. Add this repository to HACS as a custom repository
+2. Install the integration
+3. Restart Home Assistant
+4. Configure the integration
 
-1. **Aggiungi Repository Personalizzato**:
-   - Vai su **HACS > Integrations**
-   - Clicca i 3 puntini → **Custom repositories**
-   - Aggiungi:
-     ```
-     Repository: francescogalli-design/homemind-ai
-     Category: Integration
-     ```
+## Configuration
 
-2. **Installa l'Integrazione**:
-   - Cerca "HomeMind AI Assistant" in HACS
-   - Clicca **Install**
-   - Riavvia Home Assistant
+Add the integration via Settings > Devices & Services > Integrations.
 
-3. **Configura**:
-   - Vai su **Settings > Devices & Services > Integrations**
-   - Clicca **+ Add Integration**
-   - Cerca "HomeMind AI Assistant"
-   - Configura con:
-     - API URL: `http://localhost:8080` (default)
-     - Telegram Bot Token (opzionale)
-     - Telegram Chat ID (opzionale)
+## Features
 
-### Setup Servizio Esterno
-
-L'integrazione richiede il servizio HomeMind AI in esecuzione:
-
-```bash
-git clone https://github.com/francescogalli-design/homemind-ai-service.git
-cd homemind-ai-service
-cp .env.example .env
-# Configura le tue API keys nel file .env
-docker-compose up -d
-```
-
-### Utilizzo
-
-#### Servizio Chat
-```yaml
-service: homemind_ai.chat
-data:
-  message: "Accendi la luce del salotto"
-  user_id: "user1"
-```
-
-#### Sensori Disponibili
-- `sensor.homemind_ai_status`: Stato del sistema
-- `sensor.homemind_ai_active_conversations`: Conversazioni attive
-
-### Funzionalità
-- ✅ Chat AI multi-provider
-- ✅ Notifiche proattive
-- ✅ Integrazione Telegram
-- ✅ Monitoraggio energetico
-- ✅ Memoria persistente
-- ✅ Dashboard web
-
-### Supporto
-- Issues: [GitHub Issues](https://github.com/francescogalli-design/homemind-ai/issues)
-- Repository servizio: [homemind-ai-service](https://github.com/francescogalli-design/homemind-ai-service)
+- AI-powered home automation
+- Status monitoring
+- Custom sensors

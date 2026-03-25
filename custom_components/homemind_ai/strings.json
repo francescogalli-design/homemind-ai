@@ -2,26 +2,8 @@
   "config": {
     "step": {
       "user": {
-        "title": "HomeMind AI Assistant",
-        "description": "Configure HomeMind AI Assistant connection.",
-        "data": {
-          "api_url": "HomeMind AI API URL"
-        }
-      },
-      "telegram": {
-        "title": "Telegram Configuration",
-        "description": "Configure Telegram bot for HomeMind AI Assistant (optional).",
-        "data": {
-          "telegram_token": "Telegram Bot Token",
-          "telegram_chat_id": "Telegram Chat ID"
-        }
-      }
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "HomeMind AI Assistant Options",
+        "title": "HomeMind AI",
+        "description": "Configure HomeMind AI connection.",
         "data": {
           "api_url": "API URL"
         }

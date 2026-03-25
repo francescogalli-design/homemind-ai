@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN
+from .const import DOMAIN, CONF_API_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class HomeMindCoordinator(DataUpdateCoordinator):
         """Initialize."""
         self.hass = hass
         self.config_entry = config_entry
-        self._api_url = config_entry.data.get("api_url", "http://localhost:8080")
+        self._api_url = config_entry.data.get(CONF_API_URL, "http://localhost:8080")
         
         super().__init__(
             hass,
@@ -38,7 +38,8 @@ class HomeMindCoordinator(DataUpdateCoordinator):
                 "last_update": self.hass.config.time_zone_now().isoformat(),
                 "ai_providers": ["gemini", "groq"],
                 "active_conversations": 0,
-                "proactive_notifications": True
+                "proactive_notifications": True,
+                "api_url": self._api_url
             }
         except Exception as exception:
             raise UpdateFailed(f"Error communicating with HomeMind AI: {exception}")

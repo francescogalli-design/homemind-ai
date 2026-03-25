@@ -8,7 +8,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_URL, CONF_TOKEN
 
-from .const import DOMAIN, CONF_HA_URL, CONF_HA_TOKEN, CONF_TELEGRAM_TOKEN, CONF_TELEGRAM_CHAT_ID
+from .const import DOMAIN, CONF_API_URL, CONF_TELEGRAM_TOKEN, CONF_TELEGRAM_CHAT_ID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,8 +33,7 @@ class HomeMindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_HA_URL): str,
-                    vol.Required(CONF_HA_TOKEN): str,
+                    vol.Required(CONF_API_URL, default="http://localhost:8080"): str,
                 }
             ),
         )

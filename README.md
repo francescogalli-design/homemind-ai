@@ -1,94 +1,70 @@
-# 🧠 HomeMind AI Assistant - Versione Migliorata
+# 🏠 HomeMind AI Assistant - HACS Integration
 
-Un assistente AI avanzato per Home Assistant con capacità proattive e integrazione Telegram.
-
-## 🚀 Caratteristiche Migliorate
-
-### 🤖 AI Proattiva Avanzata
-- **Predizione comportamentale**: Impara le tue routine e anticipa azioni
-- **Context awareness**: Capisce il contesto domestico in tempo reale
-- **Multi-provider intelligente**: 7 provider AI con routing dinamico basato sul tipo di richiesta
-- **Memory system**: Memoria persistente a lungo termine con embeddings
-
-### 📱 Telegram Potenziato
-- **Comandi vocali avanzati**: Trascrizione e comprensione semantica
-- **Notifiche proattive**: Solo quando servono davvero, basate su contesto
-- **Conversazioni naturali**: Chat contestuale con memoria della conversazione
-- **Quick actions**: Bottoni rapidi per azioni comuni
-
-### 🏠 Home Assistant Integration
-- **Real-time monitoring**: WebSocket per stato istantaneo
-- **Automazioni intelligenti**: Create e modificate via linguaggio naturale
-- **Energy optimization**: Gestione intelligente di consumi e produzione solare
-- **Security management**: Allarmi con riconoscimento pattern
-
-### 🎨 Interfaccia Web Moderna
-- **Dashboard React**: Interfaccia responsive e reattiva
-- **Real-time updates**: Stato live di tutti i dispositivi
-- **Configuration wizard**: Setup guidato per nuove funzionalità
-- **Analytics dashboard**: Grafici e statistiche avanzate
-
-## 📁 Struttura Progetto
-
-```
-homemind-ai/
-├── src/
-│   ├── core/                 # Core system
-│   │   ├── ai_engine.py     # AI multi-provider
-│   │   ├── memory_system.py # Memoria persistente
-│   │   └── context_manager.py # Gestione contesto
-│   ├── integrations/         # Integrazioni esterne
-│   │   ├── telegram/         # Bot Telegram
-│   │   ├── homeassistant/    # Client HA
-│   │   └── voice/           # Voce e TTS
-│   ├── analytics/            # Analisi e predizioni
-│   │   ├── energy_analyzer.py
-│   │   ├── behavior_predictor.py
-│   │   └── routine_detector.py
-│   ├── web/                 # Interfaccia web
-│   │   ├── api/            # API FastAPI
-│   │   └── frontend/       # React dashboard
-│   └── plugins/             # Sistema plugin
-├── config/                  # Configurazioni
-├── tests/                   # Test suite
-└── docs/                    # Documentazione
-```
-
-## 🛠️ Installazione
+## 📦 Installazione Tramite HACS
 
 ### Prerequisiti
 - Home Assistant 2024.1+
-- Python 3.11+
-- Docker o ambiente virtuale
+- HACS installato
 
-### Setup Rapido
+### Installazione
+
+1. **Aggiungi Repository Personalizzato**:
+   - Vai su **HACS > Integrations**
+   - Clicca i 3 puntini → **Custom repositories**
+   - Aggiungi:
+     ```
+     Repository: francescogalli-design/homemind-ai
+     Category: Integration
+     ```
+
+2. **Installa l'Integrazione**:
+   - Cerca "HomeMind AI Assistant" in HACS
+   - Clicca **Install**
+   - Riavvia Home Assistant
+
+3. **Configura**:
+   - Vai su **Settings > Devices & Services > Integrations**
+   - Clicca **+ Add Integration**
+   - Cerca "HomeMind AI Assistant"
+   - Configura con:
+     - API URL: `http://localhost:8080` (default)
+     - Telegram Bot Token (opzionale)
+     - Telegram Chat ID (opzionale)
+
+### Setup Servizio Esterno
+
+L'integrazione richiede il servizio HomeMind AI in esecuzione:
+
 ```bash
-# Clona il repository
-git clone https://github.com/tu-username/homemind-ai.git
-cd homemind-ai
-
-# Installa dipendenze
-pip install -r requirements.txt
-
-# Configura le API keys
-cp config/config.example.yaml config/config.yaml
-# Edit config.yaml con le tue keys
-
-# Avvia il servizio
-python src/main.py
+git clone https://github.com/francescogalli-design/homemind-ai-service.git
+cd homemind-ai-service
+cp .env.example .env
+# Configura le tue API keys nel file .env
+docker-compose up -d
 ```
 
-## 📖 Documentazione
+### Utilizzo
 
-- [Setup completo](docs/setup.md)
-- [Configurazione AI](docs/ai-config.md)
-- [API Reference](docs/api.md)
-- [Sviluppo Plugin](docs/plugins.md)
+#### Servizio Chat
+```yaml
+service: homemind_ai.chat
+data:
+  message: "Accendi la luce del salotto"
+  user_id: "user1"
+```
 
-## 🤝 Contributi
+#### Sensori Disponibili
+- `sensor.homemind_ai_status`: Stato del sistema
+- `sensor.homemind_ai_active_conversations`: Conversazioni attive
 
-Benvenuti! Vedi [CONTRIBUTING.md](CONTRIBUTING.md) per dettagli.
+### Funzionalità
+- ✅ Chat AI multi-provider
+- ✅ Notifiche proattive
+- ✅ Integrazione Telegram
+- ✅ Monitoraggio energetico
+- ✅ Memoria persistente
+- ✅ Dashboard web
 
-## 📄 Licenza
-
-MIT License - vedi [LICENSE](LICENSE) per dettagli.
+### Supporto
+- Issues: [GitHub Issues](https://github.com/francescogalli-design/homemind-ai/issues)
+- Repository servizio: [homemind-ai-service](https://github.com/francescogalli-design/homemind-ai-service)

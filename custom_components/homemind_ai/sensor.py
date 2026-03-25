@@ -43,6 +43,7 @@ class HomeMindStatusSensor(SensorEntity, CoordinatorEntity):
                 "ai_providers": self.coordinator.data.get("ai_providers", []),
                 "active_conversations": self.coordinator.data.get("active_conversations", 0),
                 "proactive_notifications": self.coordinator.data.get("proactive_notifications", False),
+                "api_url": self.coordinator.data.get("api_url"),
             }
         return {}
 

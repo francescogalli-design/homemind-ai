@@ -3,10 +3,9 @@
     "step": {
       "user": {
         "title": "HomeMind AI Assistant",
-        "description": "Configure HomeMind AI Assistant connection to your Home Assistant.",
+        "description": "Configure HomeMind AI Assistant connection.",
         "data": {
-          "ha_url": "Home Assistant URL",
-          "ha_token": "Home Assistant Token"
+          "api_url": "HomeMind AI API URL"
         }
       },
       "telegram": {

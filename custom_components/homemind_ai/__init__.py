@@ -11,7 +11,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .const import DOMAIN, CONF_HA_URL, CONF_HA_TOKEN
+from .const import DOMAIN
 from .coordinator import HomeMindCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Store coordinator
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
         
-        # Setup platforms (sensors, switches, etc.)
+        # Setup platforms
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         
         # Setup services

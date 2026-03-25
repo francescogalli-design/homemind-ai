@@ -1,0 +1,12 @@
+{
+  "domain": "homemind_ai",
+  "name": "HomeMind AI Assistant",
+  "version": "2.0.0",
+  "documentation": "https://github.com/francescogalli-design/homemind-ai",
+  "issue_tracker": "https://github.com/francescogalli-design/homemind-ai/issues",
+  "dependencies": [],
+  "codeowners": ["@francescogalli-design"],
+  "requirements": [],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}

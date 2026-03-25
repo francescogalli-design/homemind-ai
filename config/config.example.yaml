@@ -1,0 +1,73 @@
+# HomeMind AI Assistant - Configuration Example
+# Copy this file to config.yaml and fill in your values
+
+# Application Settings
+app_name: "HomeMind AI Assistant"
+version: "2.0.0"
+debug: false
+
+# Home Assistant Integration
+ha_url: "http://homeassistant.local:8123"  # Your Home Assistant URL
+ha_token: "YOUR_HA_TOKEN"  # Get from Home Assistant > Profile > Long-Lived Access Tokens
+ha_websocket_url: "ws://homeassistant.local:8123/api/websocket"
+
+# AI Providers - Configure at least one!
+# Gemini (Google) - Free tier available
+gemini_api_key: "YOUR_GEMINI_API_KEY"  # Get from https://aistudio.google.com
+gemini_model: "gemini-2.0-flash"
+
+# Groq - Fast and free tier available
+groq_api_key: "YOUR_GROQ_API_KEY"  # Get from https://console.groq.com
+groq_model: "llama-3.3-70b-versatile"
+
+# Cerebras - Very fast, free tier available
+cerebras_api_key: "YOUR_CEREBRAS_API_KEY"  # Get from https://cloud.cerebras.ai
+cerebras_model: "llama3.1-8b"
+
+# DeepSeek - Affordable
+deepseek_api_key: "YOUR_DEEPSEEK_API_KEY"  # Get from https://platform.deepseek.com
+deepseek_model: "deepseek-chat"
+
+# Claude (Anthropic) - Paid
+claude_api_key: "YOUR_CLAUDE_API_KEY"  # Get from https://console.anthropic.com
+claude_model: "claude-3-5-haiku-20241022"
+
+# OpenAI - Paid
+openai_api_key: "YOUR_OPENAI_API_KEY"  # Get from https://platform.openai.com
+openai_model: "gpt-4o-mini"
+
+# AI Provider Priority Order (providers will be tried in this order)
+ai_provider_order: ["gemini", "groq", "cerebras", "deepseek", "claude", "openai"]
+
+# Telegram Integration
+telegram_bot_token: "YOUR_TELEGRAM_BOT_TOKEN"  # Get from @BotFather
+telegram_chat_id: "YOUR_TELEGRAM_CHAT_ID"  # Get from @userinfobot
+telegram_language: "it"
+
+# Memory System
+memory_db_path: "./data/memory.db"
+embeddings_model: "sentence-transformers/all-MiniLM-L6-v2"
+memory_retention_days: 365
+
+# Analytics Features
+energy_monitoring_enabled: true
+behavior_analysis_enabled: true
+routine_detection_enabled: true
+
+# Proactive Features
+proactive_notifications_enabled: true
+proactive_sensitivity: 0.7  # 0.0 to 1.0 - higher = more sensitive
+max_proactive_notifications_per_hour: 5
+
+# Security
+alarm_code: "1234"  # Change this!
+trusted_users: []  # List of trusted user IDs
+
+# Web Interface
+web_host: "0.0.0.0"
+web_port: 8080
+web_secret_key: "change-this-in-production"  # Generate a random string
+
+# Logging
+log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+log_file: "homemind.log"

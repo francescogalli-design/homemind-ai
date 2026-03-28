@@ -1,7 +1,7 @@
 {
   "domain": "homemind_ai",
   "name": "HomeMind AI",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "documentation": "https://github.com/francescogalli-design/homemind-ai",
   "issue_tracker": "https://github.com/francescogalli-design/homemind-ai/issues",
   "dependencies": [],

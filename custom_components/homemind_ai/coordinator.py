@@ -10,7 +10,7 @@ from homeassistant.components import camera
 from homeassistant.components.camera import Camera as CameraEntity
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
@@ -320,51 +320,119 @@ class HomeMindCoordinator(DataUpdateCoordinator):
 
     async def async_what_is_happening(self) -> str:
         """
-        Snapshot every configured camera right now and ask Ollama to describe
-        what it sees. Returns a human-readable multi-camera summary and stores
-        it as the 'current_scene' in coordinator state.
+        Snapshot every configured camera and ask Ollama to describe each scene.
+
+        Flow:
+        1. Immediately notify Telegram that analysis is starting
+        2. For each camera: find snapshot variant → get image → AI describe
+           → send partial Telegram update (or error) right away
+        3. Build full text recap and store in current_scene sensor
+        4. Send Telegram text recap
+        5. Send individual photos with captions
         """
+        query_time = dt_util.now()
+        time_str = query_time.strftime("%H:%M")
+
+        async def _tg(text: str) -> None:
+            if self._telegram:
+                try:
+                    await self._telegram.send_message(text)
+                except Exception as e:
+                    _LOGGER.warning("Telegram send failed: %s", e)
+
+        # --- guard checks ---
         if not self._cameras:
-            result = "Nessuna telecamera configurata in HomeMind AI."
-            self._current_scene = result
+            msg = "⚠️ <b>HomeMind AI</b> — Nessuna telecamera configurata."
+            self._current_scene = msg
             self.async_set_updated_data(self._build_state())
-            return result
+            await _tg(msg)
+            return msg
 
         if not self._ollama_online:
-            result = "Ollama non è raggiungibile. Verifica che sia attivo."
-            self._current_scene = result
+            msg = "⚠️ <b>HomeMind AI</b> — Ollama non raggiungibile. Verifica che sia attivo."
+            self._current_scene = msg
             self.async_set_updated_data(self._build_state())
-            return result
+            await _tg(msg)
+            return msg
 
-        descriptions: list[str] = []
-        query_time = dt_util.now()
+        n = len(self._cameras)
 
-        for cam_entity in self._cameras:
-            cam_label = cam_entity.replace("camera.", "").replace("_", " ").title()
-            try:
-                image_bytes = await self._get_camera_image(cam_entity)
-                desc = await self._ollama.describe_scene(image_bytes, cam_label)
-                descriptions.append(f"📷 <b>{cam_label}</b>: {desc}")
-            except Exception as err:
-                err_msg = str(err) if str(err) else repr(err)
-                _LOGGER.warning("Snapshot failed for %s: %s", cam_entity, err_msg)
-                descriptions.append(f"📷 <b>{cam_label}</b>: impossibile acquisire snapshot ({err_msg})")
-
-        summary = "\n\n".join(descriptions)
-        full = (
-            f"🕐 {query_time.strftime('%H:%M')} — situazione attuale:\n\n{summary}"
+        # 1. Start notification
+        await _tg(
+            f"🔍 <b>HomeMind AI</b> — Analisi in corso...\n"
+            f"🕐 {time_str} — scansione di {n} telecamer{'a' if n == 1 else 'e'}"
         )
 
+        # 2. Per-camera analysis with immediate feedback
+        # Each result: {label, snap_entity, desc, image_bytes, error}
+        results: list[dict] = []
+
+        for i, cam_entity in enumerate(self._cameras):
+            cam_label = cam_entity.replace("camera.", "").replace("_", " ").title()
+            snap_entity = await self._find_snapshot_camera(cam_entity)
+            prefix = f"[{i + 1}/{n}] 📷 <b>{cam_label}</b>"
+
+            try:
+                image_bytes = await self._get_camera_image(snap_entity)
+                desc = await self._ollama.describe_scene(image_bytes, cam_label)
+                results.append({
+                    "label": cam_label,
+                    "snap_entity": snap_entity,
+                    "desc": desc,
+                    "image": image_bytes,
+                    "error": None,
+                })
+                await _tg(f"✅ {prefix}\n{desc}")
+
+            except Exception as err:
+                err_msg = str(err) if str(err) else repr(err)
+                _LOGGER.warning("Snapshot failed for %s (via %s): %s", cam_entity, snap_entity, err_msg)
+                results.append({
+                    "label": cam_label,
+                    "snap_entity": snap_entity,
+                    "desc": None,
+                    "image": None,
+                    "error": err_msg,
+                })
+                await _tg(f"❌ {prefix}\n<code>{err_msg}</code>")
+
+        # 3. Build full text recap for the sensor
+        recap_lines = []
+        for r in results:
+            if r["error"]:
+                recap_lines.append(f"📷 <b>{r['label']}</b>: ❌ {r['error']}")
+            else:
+                recap_lines.append(f"📷 <b>{r['label']}</b>: {r['desc']}")
+
+        full = f"🕐 {time_str} — situazione attuale:\n\n" + "\n\n".join(recap_lines)
         self._current_scene = full
         self.async_set_updated_data(self._build_state())
 
-        # Send via Telegram if configured
-        if self._telegram:
-            await self._telegram.send_message(
-                f"🏠 <b>HomeMind AI — Situazione Attuale</b>\n{full}"
+        # 4. Send text recap
+        ok_count = sum(1 for r in results if not r["error"])
+        await _tg(
+            f"📋 <b>HomeMind AI — Riepilogo {time_str}</b>\n"
+            f"✅ {ok_count}/{n} telecamere analizzate\n\n"
+            + "\n".join(
+                f"{'✅' if not r['error'] else '❌'} <b>{r['label']}</b>: "
+                + (r["desc"] if r["desc"] else r["error"])
+                for r in results
             )
+        )
 
-        _LOGGER.info("what_is_happening: %d cameras queried", len(self._cameras))
+        # 5. Send individual photos
+        if self._telegram:
+            for r in results:
+                if r["image"] and r["desc"]:
+                    try:
+                        await self._telegram.send_photo(
+                            r["image"],
+                            f"📷 <b>{r['label']}</b>\n{r['desc']}"
+                        )
+                    except Exception as e:
+                        _LOGGER.warning("Failed to send photo for %s: %s", r["label"], e)
+
+        _LOGGER.info("what_is_happening: %d/%d cameras ok", ok_count, n)
         return full
 
     def clear_alerts(self) -> None:
@@ -442,6 +510,37 @@ class HomeMindCoordinator(DataUpdateCoordinator):
         """Parse 'HH:MM' or 'HH:MM:SS' into a time object."""
         parts = time_str.split(":")
         return dt_time(int(parts[0]), int(parts[1]))
+
+    async def _find_snapshot_camera(self, cam_entity: str) -> str:
+        """
+        For a given camera entity, find the best snapshot-capable variant.
+        Prefers entities containing 'istantanee' on the same device.
+        Falls back to the original entity_id if nothing better is found.
+        """
+        ent_reg = er.async_get(self.hass)
+        dev_reg = dr.async_get(self.hass)
+
+        cam_entry = ent_reg.async_get(cam_entity)
+        if not cam_entry or not cam_entry.device_id:
+            return cam_entity
+
+        # Collect all camera entities for the same device that contain 'istantanee'
+        candidates = sorted([
+            entry.entity_id
+            for entry in ent_reg.entities.values()
+            if (
+                entry.device_id == cam_entry.device_id
+                and entry.domain == "camera"
+                and "istantanee" in entry.entity_id
+                and entry.entity_id != cam_entity
+            )
+        ])
+
+        if candidates:
+            _LOGGER.debug("Snapshot variant found: %s → %s", cam_entity, candidates[0])
+            return candidates[0]
+
+        return cam_entity
 
     async def _get_camera_image(self, cam_entity: str, timeout: float = 30) -> bytes:
         """

@@ -4,8 +4,13 @@ import logging
 from datetime import timedelta, time as dt_time
 from pathlib import Path
 
+import asyncio
+
 from homeassistant.components import camera
+from homeassistant.components.camera import Camera as CameraEntity
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_change,
@@ -183,10 +188,9 @@ class HomeMindCoordinator(DataUpdateCoordinator):
 
             # Capture snapshot
             try:
-                img = await camera.async_get_image(self.hass, camera_entity)
-                image_bytes = img.content
+                image_bytes = await self._get_camera_image(camera_entity)
             except Exception as err:
-                _LOGGER.error("Snapshot failed for %s: %s", camera_entity, err)
+                _LOGGER.error("Snapshot failed for %s: %s", camera_entity, repr(err))
                 return
 
             # AI analysis (with fallback if Ollama is offline)
@@ -308,11 +312,11 @@ class HomeMindCoordinator(DataUpdateCoordinator):
     async def async_analyze_camera(self, camera_entity_id: str) -> dict:
         """Manually analyze a camera snapshot (HA service)."""
         try:
-            img = await camera.async_get_image(self.hass, camera_entity_id)
-            result = await self._ollama.analyze_image(img.content)
+            image_bytes = await self._get_camera_image(camera_entity_id)
+            result = await self._ollama.analyze_image(image_bytes)
             return result or {"error": "No result from Ollama"}
         except Exception as err:
-            return {"error": str(err)}
+            return {"error": repr(err)}
 
     async def async_what_is_happening(self) -> str:
         """
@@ -338,11 +342,13 @@ class HomeMindCoordinator(DataUpdateCoordinator):
         for cam_entity in self._cameras:
             cam_label = cam_entity.replace("camera.", "").replace("_", " ").title()
             try:
-                img = await camera.async_get_image(self.hass, cam_entity)
-                desc = await self._ollama.describe_scene(img.content, cam_label)
+                image_bytes = await self._get_camera_image(cam_entity)
+                desc = await self._ollama.describe_scene(image_bytes, cam_label)
                 descriptions.append(f"📷 <b>{cam_label}</b>: {desc}")
             except Exception as err:
-                descriptions.append(f"📷 <b>{cam_label}</b>: impossibile acquisire snapshot ({err})")
+                err_msg = str(err) if str(err) else repr(err)
+                _LOGGER.warning("Snapshot failed for %s: %s", cam_entity, err_msg)
+                descriptions.append(f"📷 <b>{cam_label}</b>: impossibile acquisire snapshot ({err_msg})")
 
         summary = "\n\n".join(descriptions)
         full = (
@@ -436,6 +442,46 @@ class HomeMindCoordinator(DataUpdateCoordinator):
         """Parse 'HH:MM' or 'HH:MM:SS' into a time object."""
         parts = time_str.split(":")
         return dt_time(int(parts[0]), int(parts[1]))
+
+    async def _get_camera_image(self, cam_entity: str, timeout: float = 30) -> bytes:
+        """
+        Robust camera snapshot helper.
+        Tries two approaches:
+        1. camera.async_get_image() with explicit timeout
+        2. Direct entity access via component registry
+        Raises Exception with descriptive message on failure.
+        """
+        # Approach 1: standard HA helper with extended timeout
+        try:
+            img = await camera.async_get_image(self.hass, cam_entity, timeout=timeout)
+            if img and img.content:
+                return img.content
+        except HomeAssistantError as err:
+            # HA 2024+ HomeAssistantError may have empty str(); use repr for details
+            err_str = repr(err) if not str(err) else str(err)
+            _LOGGER.debug("async_get_image HomeAssistantError for %s: %s", cam_entity, err_str)
+        except asyncio.TimeoutError:
+            _LOGGER.debug("async_get_image timeout for %s", cam_entity)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("async_get_image unexpected error for %s: %s", cam_entity, repr(err))
+
+        # Approach 2: access camera entity directly
+        try:
+            from homeassistant.components.camera import DATA_COMPONENT  # noqa: PLC0415
+            component = self.hass.data.get(DATA_COMPONENT)
+            if component:
+                cam_obj = component.get_entity(cam_entity)
+                if cam_obj is not None:
+                    async with asyncio.timeout(timeout):
+                        raw = await cam_obj.async_camera_image()
+                    if raw:
+                        return raw
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Direct entity timeout for %s", cam_entity)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Direct entity error for %s: %s", cam_entity, repr(err))
+
+        raise HomeAssistantError(f"Impossibile acquisire snapshot da {cam_entity}")
 
     async def _save_snapshot(self, image_bytes: bytes, filename: str) -> None:
         """Save snapshot JPEG to /config/www/homemind_snapshots/."""

@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HomeMind AI — AI Setup",
+        "description": "Configure your local Ollama AI. Make sure Ollama is running on your machine.",
+        "data": {
+          "ollama_url": "Ollama URL",
+          "ollama_model": "Vision Model"
+        },
+        "data_description": {
+          "ollama_url": "E.g. http://localhost:11434",
+          "ollama_model": "Use 'llava' or 'llava-phi3' for image recognition"
+        }
+      },
+      "telegram": {
+        "title": "HomeMind AI — Telegram Notifications",
+        "description": "Configure your Telegram bot for alerts and reports (optional). Leave blank to skip.",
+        "data": {
+          "telegram_token": "Bot Token",
+          "telegram_chat_id": "Chat ID"
+        },
+        "data_description": {
+          "telegram_token": "Get it from @BotFather on Telegram",
+          "telegram_chat_id": "Your personal Chat ID (e.g. 123456789)"
+        }
+      },
+      "cameras": {
+        "title": "HomeMind AI — Cameras & Sensors",
+        "description": "Select the cameras to monitor and the motion sensors that trigger analysis.",
+        "data": {
+          "cameras": "Cameras",
+          "motion_sensors": "Motion Sensors"
+        }
+      },
+      "schedule": {
+        "title": "HomeMind AI — Schedule",
+        "description": "Set the night monitoring window and the morning report time.",
+        "data": {
+          "night_start": "Night Monitoring Start",
+          "night_end": "Night Monitoring End",
+          "report_time": "Morning Report Time"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to Ollama. Please verify it is running.",
+      "invalid_token": "Invalid Telegram bot token."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HomeMind AI Settings",
+        "data": {
+          "ollama_url": "Ollama URL",
+          "ollama_model": "Vision Model",
+          "telegram_token": "Telegram Bot Token",
+          "telegram_chat_id": "Telegram Chat ID",
+          "cameras": "Cameras",
+          "motion_sensors": "Motion Sensors",
+          "night_start": "Night Start",
+          "night_end": "Night End",
+          "report_time": "Report Time"
+        }
+      }
+    }
+  }
+}

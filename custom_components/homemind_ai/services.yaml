@@ -1,0 +1,27 @@
+generate_report:
+  name: Generate Report
+  description: >
+    Immediately generate and send the morning security report via Telegram,
+    summarising all events captured since the last report.
+  fields: {}
+
+analyze_camera:
+  name: Analyze Camera
+  description: >
+    Capture a snapshot from the specified camera and run an AI analysis on it.
+    Useful for on-demand checks or debugging.
+  fields:
+    camera_entity:
+      name: Camera Entity
+      description: The entity ID of the camera to analyze.
+      required: true
+      selector:
+        entity:
+          domain: camera
+
+clear_alerts:
+  name: Clear Alerts
+  description: >
+    Clear the current night's alert queue.
+    Useful for resetting after a false alarm or testing.
+  fields: {}

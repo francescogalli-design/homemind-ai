@@ -25,3 +25,12 @@ clear_alerts:
     Clear the current night's alert queue.
     Useful for resetting after a false alarm or testing.
   fields: {}
+
+what_is_happening:
+  name: Cosa sta succedendo?
+  description: >
+    Cattura uno snapshot da tutte le telecamere configurate adesso e chiede a Ollama
+    di descrivere cosa vede in ciascuna. Il risultato viene salvato nel sensore
+    "HomeMind Current Scene" e inviato via Telegram (se configurato).
+    Ideale per test rapidi e controlli on-demand.
+  fields: {}

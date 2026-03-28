@@ -15,6 +15,7 @@ from .const import (
     SERVICE_ANALYZE_CAMERA,
     SERVICE_CLEAR_ALERTS,
     SERVICE_GENERATE_REPORT,
+    SERVICE_WHAT_IS_HAPPENING,
 )
 from .coordinator import HomeMindCoordinator
 
@@ -76,6 +77,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             DOMAIN, SERVICE_CLEAR_ALERTS, _handle_clear_alerts
         )
 
+    async def _handle_what_is_happening(call: ServiceCall) -> None:
+        """Service: snapshot all cameras and describe current scene."""
+        for coord in hass.data[DOMAIN].values():
+            await coord.async_what_is_happening()
+
+    if not hass.services.has_service(DOMAIN, SERVICE_WHAT_IS_HAPPENING):
+        hass.services.async_register(
+            DOMAIN, SERVICE_WHAT_IS_HAPPENING, _handle_what_is_happening
+        )
+
     # Reload integration when options are updated via UI
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
 
@@ -98,6 +109,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.services.async_remove(DOMAIN, SERVICE_GENERATE_REPORT)
             hass.services.async_remove(DOMAIN, SERVICE_ANALYZE_CAMERA)
             hass.services.async_remove(DOMAIN, SERVICE_CLEAR_ALERTS)
+            hass.services.async_remove(DOMAIN, SERVICE_WHAT_IS_HAPPENING)
 
     return unload_ok
 

@@ -74,6 +74,7 @@ class HomeMindCoordinator(DataUpdateCoordinator):
         self._tonight_events: list[dict] = []
         self._last_alert: dict | None = None
         self._last_report: dict | None = None
+        self._current_scene: str | None = None
         self._ollama_online: bool = False
         self._processing: bool = False
         self._last_triggered: dict[str, float] = {}  # entity_id → timestamp
@@ -313,6 +314,53 @@ class HomeMindCoordinator(DataUpdateCoordinator):
         except Exception as err:
             return {"error": str(err)}
 
+    async def async_what_is_happening(self) -> str:
+        """
+        Snapshot every configured camera right now and ask Ollama to describe
+        what it sees. Returns a human-readable multi-camera summary and stores
+        it as the 'current_scene' in coordinator state.
+        """
+        if not self._cameras:
+            result = "Nessuna telecamera configurata in HomeMind AI."
+            self._current_scene = result
+            self.async_set_updated_data(self._build_state())
+            return result
+
+        if not self._ollama_online:
+            result = "Ollama non è raggiungibile. Verifica che sia attivo."
+            self._current_scene = result
+            self.async_set_updated_data(self._build_state())
+            return result
+
+        descriptions: list[str] = []
+        query_time = dt_util.now()
+
+        for cam_entity in self._cameras:
+            cam_label = cam_entity.replace("camera.", "").replace("_", " ").title()
+            try:
+                img = await camera.async_get_image(self.hass, cam_entity)
+                desc = await self._ollama.describe_scene(img.content, cam_label)
+                descriptions.append(f"📷 <b>{cam_label}</b>: {desc}")
+            except Exception as err:
+                descriptions.append(f"📷 <b>{cam_label}</b>: impossibile acquisire snapshot ({err})")
+
+        summary = "\n\n".join(descriptions)
+        full = (
+            f"🕐 {query_time.strftime('%H:%M')} — situazione attuale:\n\n{summary}"
+        )
+
+        self._current_scene = full
+        self.async_set_updated_data(self._build_state())
+
+        # Send via Telegram if configured
+        if self._telegram:
+            await self._telegram.send_message(
+                f"🏠 <b>HomeMind AI — Situazione Attuale</b>\n{full}"
+            )
+
+        _LOGGER.info("what_is_happening: %d cameras queried", len(self._cameras))
+        return full
+
     def clear_alerts(self) -> None:
         """Clear tonight's alert log (HA service)."""
         self._tonight_events = []
@@ -344,6 +392,7 @@ class HomeMindCoordinator(DataUpdateCoordinator):
             "alerts_tonight": len(self._tonight_events),
             "last_alert": self._last_alert,
             "last_report": self._last_report,
+            "current_scene": self._current_scene,
             "cameras": self._cameras,
             "motion_sensors": self._motion_sensors,
         }

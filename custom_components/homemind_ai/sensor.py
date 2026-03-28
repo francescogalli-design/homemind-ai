@@ -28,6 +28,7 @@ async def async_setup_entry(
         HomeMindAlertsCountSensor(coordinator, entry.entry_id),
         HomeMindLastAlertSensor(coordinator, entry.entry_id),
         HomeMindLastReportSensor(coordinator, entry.entry_id),
+        HomeMindCurrentSceneSensor(coordinator, entry.entry_id),
     ])
 
 
@@ -182,3 +183,33 @@ class HomeMindLastReportSensor(_HomeMindBaseSensor):
             "event_count": report.get("event_count", 0),
             "generated_at": report.get("time"),
         }
+
+
+# ---------------------------------------------------------------------------
+# Sensor: Current scene (what_is_happening result)
+# ---------------------------------------------------------------------------
+
+class HomeMindCurrentSceneSensor(_HomeMindBaseSensor):
+    """Live description of all cameras — updated by the what_is_happening service."""
+
+    _attr_icon = "mdi:eye"
+
+    def __init__(self, coordinator, entry_id):
+        super().__init__(coordinator, entry_id, "current_scene")
+        self._attr_name = "HomeMind Current Scene"
+
+    @property
+    def native_value(self) -> str:
+        scene = self._data.get("current_scene")
+        if scene:
+            # Return first line as state value (max 255 chars)
+            first_line = scene.split("\n")[0]
+            return first_line[:255]
+        return "non interrogato"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        scene = self._data.get("current_scene")
+        if not scene:
+            return {}
+        return {"full_description": scene[:2000]}

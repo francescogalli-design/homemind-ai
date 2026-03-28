@@ -15,7 +15,7 @@ CONF_REPORT_TIME = "report_time"
 
 # --- Defaults ---
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
-DEFAULT_OLLAMA_MODEL = "llava"
+DEFAULT_OLLAMA_MODEL = "moondream"
 DEFAULT_NIGHT_START = "22:00:00"
 DEFAULT_NIGHT_END = "06:00:00"
 DEFAULT_REPORT_TIME = "07:00:00"
@@ -28,3 +28,4 @@ EVENT_HOMEMIND_REPORT = f"{DOMAIN}_report"
 SERVICE_GENERATE_REPORT = "generate_report"
 SERVICE_ANALYZE_CAMERA = "analyze_camera"
 SERVICE_CLEAR_ALERTS = "clear_alerts"
+SERVICE_WHAT_IS_HAPPENING = "what_is_happening"

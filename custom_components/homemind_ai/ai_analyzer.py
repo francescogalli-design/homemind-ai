@@ -122,6 +122,38 @@ class OllamaAnalyzer:
             _LOGGER.error("Report generation error: %s", err)
             return f"Report non disponibile: {err}"
 
+    async def describe_scene(self, image_bytes: bytes, camera_name: str) -> str:
+        """Describe what is currently visible in a camera scene (snapshot query)."""
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        prompt = (
+            f"Stai guardando l'immagine della telecamera '{camera_name}'.\n"
+            "Descrivi brevemente e in modo naturale quello che vedi: ambiente, persone, oggetti, "
+            "stato della scena. Sii conciso (2-3 frasi max). Rispondi in italiano."
+        )
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False,
+            "options": {"temperature": 0.2},
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.ollama_url}/api/generate",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=45),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("response", "Nessuna descrizione disponibile.").strip()
+                    return f"Errore HTTP {response.status} da Ollama."
+        except aiohttp.ClientConnectorError:
+            return "Ollama non raggiungibile."
+        except Exception as err:
+            _LOGGER.error("describe_scene error: %s", err)
+            return f"Errore: {err}"
+
     async def check_connection(self) -> bool:
         """Check if Ollama is reachable and the model is available."""
         try:

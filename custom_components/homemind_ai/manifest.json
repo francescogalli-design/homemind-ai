@@ -1,0 +1,12 @@
+{
+  "domain": "homemind_ai",
+  "name": "HomeMind AI",
+  "version": "1.4.3",
+  "documentation": "https://github.com/francescogalli-design/homemind-ai",
+  "issue_tracker": "https://github.com/francescogalli-design/homemind-ai/issues",
+  "codeowners": ["@francescogalli-design"],
+  "requirements": ["google-generativeai>=0.8.0"],
+  "dependencies": [],
+  "iot_class": "cloud_push",
+  "config_flow": true
+}

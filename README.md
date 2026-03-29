@@ -1,94 +1,86 @@
-# 🧠 HomeMind AI Assistant - Versione Migliorata
+# 🧠 HomeMind AI
 
-Un assistente AI avanzato per Home Assistant con capacità proattive e integrazione Telegram.
+Sicurezza proattiva per Home Assistant — powered by **Gemini Vision**.
 
-## 🚀 Caratteristiche Migliorate
+HomeMind AI monitora le telecamere di casa, usa Gemini Vision per analizzare cosa succede, e ti invia notifiche Telegram immediate quando rileva qualcosa di sospetto. Ogni mattina ricevi un riepilogo della notte.
 
-### 🤖 AI Proattiva Avanzata
-- **Predizione comportamentale**: Impara le tue routine e anticipa azioni
-- **Context awareness**: Capisce il contesto domestico in tempo reale
-- **Multi-provider intelligente**: 7 provider AI con routing dinamico basato sul tipo di richiesta
-- **Memory system**: Memoria persistente a lungo termine con embeddings
+## ✨ Funzionalità
 
-### 📱 Telegram Potenziato
-- **Comandi vocali avanzati**: Trascrizione e comprensione semantica
-- **Notifiche proattive**: Solo quando servono davvero, basate su contesto
-- **Conversazioni naturali**: Chat contestuale con memoria della conversazione
-- **Quick actions**: Bottoni rapidi per azioni comuni
+- **Monitoraggio notturno** — finestra configurabile (default 22:00→06:00)
+- **Gemini Vision** — analisi AI delle immagini: persone, veicoli, attività sospette
+- **Notifiche Telegram** — alert immediati con foto + analisi in italiano
+- **Report mattutino** — riepilogo giornaliero generato da AI
+- **Trigger su movimento** — analisi automatica al rilevamento movimento
+- **Servizi HA** — `analyze_camera`, `generate_report`, `clear_alerts`
+- **5 sensori HA** — stato, night mode, alert count, ultimo alert, ultimo report
+- **Configurabile da UI** — nessun YAML richiesto
 
-### 🏠 Home Assistant Integration
-- **Real-time monitoring**: WebSocket per stato istantaneo
-- **Automazioni intelligenti**: Create e modificate via linguaggio naturale
-- **Energy optimization**: Gestione intelligente di consumi e produzione solare
-- **Security management**: Allarmi con riconoscimento pattern
+## 📦 Installazione via HACS
 
-### 🎨 Interfaccia Web Moderna
-- **Dashboard React**: Interfaccia responsive e reattiva
-- **Real-time updates**: Stato live di tutti i dispositivi
-- **Configuration wizard**: Setup guidato per nuove funzionalità
-- **Analytics dashboard**: Grafici e statistiche avanzate
+1. Apri HACS → Integrazioni → Menu (⋮) → **Repository personalizzati**
+2. Aggiungi `https://github.com/francescogalli-design/homemind-ai` come **Integrazione**
+3. Cerca **HomeMind AI** e clicca Scarica
+4. Riavvia Home Assistant
+5. Vai in **Impostazioni → Dispositivi e Servizi → Aggiungi integrazione** → cerca HomeMind AI
 
-## 📁 Struttura Progetto
+## ⚙️ Configurazione
 
-```
-homemind-ai/
-├── src/
-│   ├── core/                 # Core system
-│   │   ├── ai_engine.py     # AI multi-provider
-│   │   ├── memory_system.py # Memoria persistente
-│   │   └── context_manager.py # Gestione contesto
-│   ├── integrations/         # Integrazioni esterne
-│   │   ├── telegram/         # Bot Telegram
-│   │   ├── homeassistant/    # Client HA
-│   │   └── voice/           # Voce e TTS
-│   ├── analytics/            # Analisi e predizioni
-│   │   ├── energy_analyzer.py
-│   │   ├── behavior_predictor.py
-│   │   └── routine_detector.py
-│   ├── web/                 # Interfaccia web
-│   │   ├── api/            # API FastAPI
-│   │   └── frontend/       # React dashboard
-│   └── plugins/             # Sistema plugin
-├── config/                  # Configurazioni
-├── tests/                   # Test suite
-└── docs/                    # Documentazione
-```
+Il wizard ti guida in 1 step:
 
-## 🛠️ Installazione
+| Campo | Descrizione |
+|-------|-------------|
+| Gemini API Key | Da [aistudio.google.com](https://aistudio.google.com) |
+| Modello Gemini | `gemini-2.0-flash` (consigliato) |
+| Telegram Bot Token | Da [@BotFather](https://t.me/botfather) (opzionale) |
+| Telegram Chat ID | Da [@userinfobot](https://t.me/userinfobot) (opzionale) |
+| Inizio notte | Ora attivazione monitoraggio (default: 22) |
+| Fine notte | Ora disattivazione monitoraggio (default: 6) |
+| Ora report mattutino | (default: 7) |
 
-### Prerequisiti
-- Home Assistant 2024.1+
-- Python 3.11+
-- Docker o ambiente virtuale
+## 📡 Sensori
 
-### Setup Rapido
-```bash
-# Clona il repository
-git clone https://github.com/tu-username/homemind-ai.git
-cd homemind-ai
+| Entity | Descrizione |
+|--------|-------------|
+| `sensor.homemind_ai_status` | `online` / `error` |
+| `sensor.homemind_night_mode` | `active` / `inactive` |
+| `sensor.homemind_alerts_tonight` | Numero alert della notte |
+| `sensor.homemind_last_alert` | Descrizione ultimo alert |
+| `sensor.homemind_last_report` | Testo ultimo report mattutino |
 
-# Installa dipendenze
-pip install -r requirements.txt
+## 🔧 Servizi
 
-# Configura le API keys
-cp config/config.example.yaml config/config.yaml
-# Edit config.yaml con le tue keys
+```yaml
+# Analizza una camera on-demand
+service: homemind_ai.analyze_camera
+data:
+  entity_id: camera.ingresso
 
-# Avvia il servizio
-python src/main.py
+# Genera report manualmente
+service: homemind_ai.generate_report
+
+# Svuota la coda degli alert
+service: homemind_ai.clear_alerts
 ```
 
-## 📖 Documentazione
+## 🤖 Automazione esempio
 
-- [Setup completo](docs/setup.md)
-- [Configurazione AI](docs/ai-config.md)
-- [API Reference](docs/api.md)
-- [Sviluppo Plugin](docs/plugins.md)
-
-## 🤝 Contributi
-
-Benvenuti! Vedi [CONTRIBUTING.md](CONTRIBUTING.md) per dettagli.
+```yaml
+automation:
+  alias: "HomeMind — Allerta Alta Priorità"
+  trigger:
+    platform: event
+    event_type: homemind_ai_alert
+    event_data:
+      priority: high
+  action:
+    - service: notify.mobile_app_il_mio_telefono
+      data:
+        title: "🚨 Allerta Sicurezza"
+        message: "{{ trigger.event.data.description }}"
+        data:
+          image: "{{ trigger.event.data.snapshot_url }}"
+```
 
 ## 📄 Licenza
 
-MIT License - vedi [LICENSE](LICENSE) per dettagli.
+MIT License

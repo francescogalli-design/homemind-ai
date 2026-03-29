@@ -1,0 +1,19 @@
+analyze_camera:
+  name: Analizza Camera
+  description: Analizza una camera specifica con Gemini Vision
+  fields:
+    entity_id:
+      name: Camera
+      description: Entità camera da analizzare (es. camera.ingresso)
+      required: true
+      selector:
+        entity:
+          domain: camera
+
+generate_report:
+  name: Genera Report
+  description: Genera e invia il report di sicurezza via Telegram
+
+clear_alerts:
+  name: Svuota Alert
+  description: Cancella la coda degli alert notturni

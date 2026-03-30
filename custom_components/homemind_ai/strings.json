@@ -2,13 +2,21 @@
   "config": {
     "step": {
       "user": {
-        "title": "HomeMind AI — Configurazione",
-        "description": "Configura HomeMind AI per il monitoraggio sicurezza con Gemini Vision.",
+        "title": "HomeMind AI — API e Telegram",
+        "description": "Configura le chiavi API e le credenziali Telegram per HomeMind AI.",
         "data": {
           "gemini_api_key": "Gemini API Key",
           "gemini_model": "Modello Gemini",
           "telegram_token": "Telegram Bot Token (opzionale)",
-          "telegram_chat_id": "Telegram Chat ID (opzionale)",
+          "telegram_chat_id": "Telegram Chat ID (opzionale)"
+        }
+      },
+      "cameras": {
+        "title": "HomeMind AI — Telecamere e Monitoraggio",
+        "description": "Seleziona le telecamere da monitorare e i sensori di movimento. Lascia vuoto per il rilevamento automatico.",
+        "data": {
+          "cameras": "Telecamere da monitorare",
+          "motion_sensors": "Sensori di movimento (opzionale)",
           "night_start": "Inizio monitoraggio notturno (ora 0-23)",
           "night_end": "Fine monitoraggio notturno (ora 0-23)",
           "morning_report_hour": "Ora report mattutino (ora 0-23)"
@@ -30,6 +38,8 @@
           "gemini_model": "Modello Gemini",
           "telegram_token": "Telegram Bot Token",
           "telegram_chat_id": "Telegram Chat ID",
+          "cameras": "Telecamere da monitorare",
+          "motion_sensors": "Sensori di movimento",
           "night_start": "Inizio monitoraggio notturno (ora 0-23)",
           "night_end": "Fine monitoraggio notturno (ora 0-23)",
           "morning_report_hour": "Ora report mattutino (ora 0-23)"

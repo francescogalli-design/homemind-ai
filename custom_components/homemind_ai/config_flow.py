@@ -1,69 +1,107 @@
-"""Config flow per HomeMind AI — wizard di configurazione HA UI."""
+"""Config flow per HomeMind AI — wizard a 2 step con selezione telecamere."""
 from __future__ import annotations
 
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
+from homeassistant.helpers import selector
 
 from .const import (
-    DOMAIN,
+    CONF_CAMERAS,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_MODEL,
-    CONF_TELEGRAM_TOKEN,
-    CONF_TELEGRAM_CHAT_ID,
-    CONF_NIGHT_START,
-    CONF_NIGHT_END,
     CONF_MORNING_REPORT_HOUR,
+    CONF_MOTION_SENSORS,
+    CONF_NIGHT_END,
+    CONF_NIGHT_START,
+    CONF_TELEGRAM_CHAT_ID,
+    CONF_TELEGRAM_TOKEN,
     DEFAULT_GEMINI_MODEL,
-    DEFAULT_NIGHT_START,
-    DEFAULT_NIGHT_END,
     DEFAULT_MORNING_REPORT_HOUR,
+    DEFAULT_NIGHT_END,
+    DEFAULT_NIGHT_START,
+    DOMAIN,
     GEMINI_MODELS,
 )
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
+
+# ------------------------------------------------------------------ #
+# Step 1 — API e Telegram
+# ------------------------------------------------------------------ #
+
+_STEP1_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_GEMINI_API_KEY): str,
         vol.Optional(CONF_GEMINI_MODEL, default=DEFAULT_GEMINI_MODEL): vol.In(GEMINI_MODELS),
         vol.Optional(CONF_TELEGRAM_TOKEN, default=""): str,
         vol.Optional(CONF_TELEGRAM_CHAT_ID, default=""): str,
-        vol.Optional(CONF_NIGHT_START, default=DEFAULT_NIGHT_START): vol.All(
-            vol.Coerce(int), vol.Range(min=0, max=23)
-        ),
-        vol.Optional(CONF_NIGHT_END, default=DEFAULT_NIGHT_END): vol.All(
-            vol.Coerce(int), vol.Range(min=0, max=23)
-        ),
-        vol.Optional(CONF_MORNING_REPORT_HOUR, default=DEFAULT_MORNING_REPORT_HOUR): vol.All(
-            vol.Coerce(int), vol.Range(min=0, max=23)
-        ),
     }
 )
 
+# ------------------------------------------------------------------ #
+# Step 2 — Telecamere, sensori e orari
+# ------------------------------------------------------------------ #
+
+def _step2_schema(current_cameras: list | None = None, current_sensors: list | None = None) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Optional(CONF_CAMERAS, default=current_cameras or []): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="camera", multiple=True)
+            ),
+            vol.Optional(CONF_MOTION_SENSORS, default=current_sensors or []): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+            ),
+            vol.Optional(CONF_NIGHT_START, default=DEFAULT_NIGHT_START): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=23)
+            ),
+            vol.Optional(CONF_NIGHT_END, default=DEFAULT_NIGHT_END): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=23)
+            ),
+            vol.Optional(CONF_MORNING_REPORT_HOUR, default=DEFAULT_MORNING_REPORT_HOUR): vol.All(
+                vol.Coerce(int), vol.Range(min=0, max=23)
+            ),
+        }
+    )
+
 
 class HomeMindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Wizard di configurazione HomeMind AI."""
+    """Wizard di configurazione HomeMind AI in 2 step."""
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        self._step1_data: dict = {}
+
     async def async_step_user(self, user_input=None):
-        """Step 1 — configurazione iniziale."""
+        """Step 1 — Gemini API key e Telegram."""
         errors = {}
 
         if user_input is not None:
-            if not user_input.get(CONF_GEMINI_API_KEY, "").strip():
+            api_key = user_input.get(CONF_GEMINI_API_KEY, "").strip()
+            if not api_key:
                 errors[CONF_GEMINI_API_KEY] = "api_key_required"
             else:
-                await self.async_set_unique_id(DOMAIN)
-                self._abort_if_unique_id_configured()
-                return self.async_create_entry(
-                    title="HomeMind AI",
-                    data=user_input,
-                )
+                self._step1_data = user_input
+                return await self.async_step_cameras()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            data_schema=_STEP1_SCHEMA,
             errors=errors,
+        )
+
+    async def async_step_cameras(self, user_input=None):
+        """Step 2 — Selezione telecamere, sensori e orari."""
+        if user_input is not None:
+            await self.async_set_unique_id(DOMAIN)
+            self._abort_if_unique_id_configured()
+
+            full_data = {**self._step1_data, **user_input}
+            return self.async_create_entry(title="HomeMind AI", data=full_data)
+
+        return self.async_show_form(
+            step_id="cameras",
+            data_schema=_step2_schema(),
         )
 
     @staticmethod
@@ -73,43 +111,38 @@ class HomeMindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class HomeMindOptionsFlow(config_entries.OptionsFlow):
-    """Opzioni modificabili dopo l'installazione."""
+    """Opzioni modificabili dopo l'installazione (accesso dal tasto Configura)."""
 
-    def __init__(self, config_entry):
+    def __init__(self, config_entry) -> None:
         self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self.config_entry.data
+        # Merge data + options attuali
+        cur = {**self.config_entry.data, **self.config_entry.options}
 
         schema = vol.Schema(
             {
-                vol.Optional(
-                    CONF_NIGHT_START,
-                    default=current.get(CONF_NIGHT_START, DEFAULT_NIGHT_START),
-                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=23)),
-                vol.Optional(
-                    CONF_NIGHT_END,
-                    default=current.get(CONF_NIGHT_END, DEFAULT_NIGHT_END),
-                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=23)),
-                vol.Optional(
-                    CONF_MORNING_REPORT_HOUR,
-                    default=current.get(CONF_MORNING_REPORT_HOUR, DEFAULT_MORNING_REPORT_HOUR),
-                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=23)),
-                vol.Optional(
-                    CONF_TELEGRAM_TOKEN,
-                    default=current.get(CONF_TELEGRAM_TOKEN, ""),
-                ): str,
-                vol.Optional(
-                    CONF_TELEGRAM_CHAT_ID,
-                    default=current.get(CONF_TELEGRAM_CHAT_ID, ""),
-                ): str,
-                vol.Optional(
-                    CONF_GEMINI_MODEL,
-                    default=current.get(CONF_GEMINI_MODEL, DEFAULT_GEMINI_MODEL),
-                ): vol.In(GEMINI_MODELS),
+                vol.Optional(CONF_GEMINI_MODEL, default=cur.get(CONF_GEMINI_MODEL, DEFAULT_GEMINI_MODEL)): vol.In(GEMINI_MODELS),
+                vol.Optional(CONF_TELEGRAM_TOKEN, default=cur.get(CONF_TELEGRAM_TOKEN, "")): str,
+                vol.Optional(CONF_TELEGRAM_CHAT_ID, default=cur.get(CONF_TELEGRAM_CHAT_ID, "")): str,
+                vol.Optional(CONF_CAMERAS, default=cur.get(CONF_CAMERAS, [])): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="camera", multiple=True)
+                ),
+                vol.Optional(CONF_MOTION_SENSORS, default=cur.get(CONF_MOTION_SENSORS, [])): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+                ),
+                vol.Optional(CONF_NIGHT_START, default=cur.get(CONF_NIGHT_START, DEFAULT_NIGHT_START)): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=23)
+                ),
+                vol.Optional(CONF_NIGHT_END, default=cur.get(CONF_NIGHT_END, DEFAULT_NIGHT_END)): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=23)
+                ),
+                vol.Optional(CONF_MORNING_REPORT_HOUR, default=cur.get(CONF_MORNING_REPORT_HOUR, DEFAULT_MORNING_REPORT_HOUR)): vol.All(
+                    vol.Coerce(int), vol.Range(min=0, max=23)
+                ),
             }
         )
 

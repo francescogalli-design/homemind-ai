@@ -1,6 +1,8 @@
 analyze_camera:
   name: Analizza Camera
-  description: Analizza una camera specifica con Gemini Vision
+  description: >
+    Analizza una camera specifica con Gemini Vision AI.
+    Invia alert Telegram se viene rilevata una minaccia.
   fields:
     entity_id:
       name: Camera
@@ -11,9 +13,25 @@ analyze_camera:
           domain: camera
 
 generate_report:
-  name: Genera Report
-  description: Genera e invia il report di sicurezza via Telegram
+  name: Genera Report Sicurezza
+  description: >
+    Genera e invia il report di sicurezza notturno via Telegram.
+    Include tutti gli eventi della notte e lo stato attuale della casa.
 
 clear_alerts:
-  name: Svuota Alert
-  description: Cancella la coda degli alert notturni
+  name: Azzera Alert
+  description: Cancella la coda degli alert notturni e azzera il contatore.
+
+ask_ai:
+  name: Chiedi all'AI
+  description: >
+    Invia una domanda all'AI con il contesto completo della casa.
+    La risposta viene inviata via Telegram e salvata nel sensore last_ai_answer.
+  fields:
+    question:
+      name: Domanda
+      description: La domanda da porre all'AI (in italiano)
+      required: true
+      example: "Chi c'è in casa? Le luci sono accese?"
+      selector:
+        text:

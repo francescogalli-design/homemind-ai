@@ -27,7 +27,8 @@ from .const import (
     DEFAULT_NIGHT_END,
     DEFAULT_NIGHT_START,
     DOMAIN,
-    GEMINI_FALLBACK_MODELS,
+    GEMINI_FALLBACK_ORDER,
+    PING_ENTITY,
     SERVICE_ANALYZE_CAMERA,
     SERVICE_ASK_AI,
     SERVICE_CLEAR_ALERTS,
@@ -85,7 +86,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         answer = await ask_gemini(
             session=session,
             api_key=coordinator.api_key,
-            model=coordinator.gemini_model,
+            model=coordinator._active_model,
             question=question,
             home_context=context,
         )
@@ -159,6 +160,12 @@ class HomeMindCoordinator:
         self.last_error: str = ""
         self.cameras_online: int = 0
         self.bot_status: str = "not_configured"
+        self.internet_status: str = "unknown"
+
+        # Modello effettivamente in uso (può essere fallback temporaneo)
+        # gemini_model = scelta utente dal config (non cambia mai)
+        # _active_model = quello realmente usato nelle chiamate API
+        self._active_model: str = self.gemini_model
 
         # Sicurezza
         self.night_events: list[dict] = []
@@ -209,33 +216,60 @@ class HomeMindCoordinator:
     # Startup: test API → avvia monitoraggio
     # ------------------------------------------------------------------ #
 
+    # ------------------------------------------------------------------ #
+    # Internet connectivity
+    # ------------------------------------------------------------------ #
+
+    def _check_internet(self) -> bool | None:
+        """
+        Verifica connessione internet tramite binary_sensor.8_8_8_8 (ping Google DNS).
+        Returns True=online, False=offline, None=entità non presente.
+        """
+        state = self.hass.states.get(PING_ENTITY)
+        if state is None:
+            return None  # Integrazione ping non configurata
+        if state.state in ("unavailable", "unknown"):
+            return None
+        return state.state == "on"
+
+    # ------------------------------------------------------------------ #
+    # Startup sequence
+    # ------------------------------------------------------------------ #
+
     async def _startup_sequence(self) -> None:
         """Testa API Gemini poi avvia il loop principale."""
         await asyncio.sleep(3)  # Attendi che HA sia pronto
+
         await self._init_model()
         self._notify_sensors()
 
-        if self.bot and self.ai_status == "online":
-            cams = await self._get_cameras()
-            cam_count = len(cams)
-            await self.bot.send_message(
-                f"*HomeMind AI* avviato\n\n"
-                f"Modello  {self.gemini_model}\n"
-                f"Telecamere  {cam_count if cam_count else 'autodetect'}\n"
-                f"Notte  {self.night_start}:00 — {self.night_end}:00\n\n"
-                f"Scrivi /help per i comandi."
-            )
-        elif self.bot and self.ai_status == "error":
-            await self.bot.send_message(
-                f"*HomeMind AI* — errore API\n\n"
-                f"{self.last_error}\n\n"
-                f"Verifica la Gemini API key nelle impostazioni."
-            )
+        if self.bot:
+            if self.ai_status == "online":
+                cams = await self._get_cameras()
+                await self.bot.send_message(
+                    f"*HomeMind AI* avviato\n\n"
+                    f"Modello  {self._active_model}"
+                    + (f" _(fallback da {self.gemini_model})_" if self._active_model != self.gemini_model else "")
+                    + f"\nTelecamere  {len(cams) if cams else 'autodetect'}\n"
+                    f"Notte  {self.night_start}:00 — {self.night_end}:00\n\n"
+                    f"Scrivi /help per i comandi."
+                )
+            elif self.ai_status in ("error", "offline"):
+                await self.bot.send_message(
+                    f"*HomeMind AI* — avvio con errore\n\n"
+                    f"{self.last_error}\n\n"
+                    + ("Controlla la connessione internet di HA." if self.ai_status == "offline"
+                       else "Verifica la Gemini API key in Impostazioni → Integrazioni → HomeMind AI → Configura.")
+                )
 
         await self._monitor_loop()
 
+    # ------------------------------------------------------------------ #
+    # Gemini model validation (rispetta la scelta utente)
+    # ------------------------------------------------------------------ #
+
     async def _test_gemini_model(self, model: str) -> tuple[bool, str]:
-        """Testa un modello Gemini con una richiesta minimale. Returns (ok, message)."""
+        """Richiesta minimale a Gemini per testare un modello. Returns (ok, message)."""
         session = async_get_clientsession(self.hass)
         url = _GEMINI_URL.format(model=model)
         payload = {
@@ -252,59 +286,101 @@ class HomeMindCoordinator:
                     return True, f"Online — {model}"
                 body = await resp.text()
                 if resp.status == 404:
-                    return False, f"Modello '{model}' non trovato (404)"
+                    return False, f"Modello '{model}' non trovato (404) — potrebbe non essere disponibile con la tua API key"
                 if resp.status == 400:
                     import json as _json
                     try:
-                        err = _json.loads(body).get("error", {}).get("message", body[:80])
+                        err = _json.loads(body).get("error", {}).get("message", body[:100])
                     except Exception:
-                        err = body[:80]
-                    return False, f"Errore API: {err}"
+                        err = body[:100]
+                    return False, f"Richiesta non valida: {err}"
+                if resp.status == 401:
+                    return False, "API key non valida (401) — verifica la chiave in Impostazioni"
                 if resp.status == 403:
-                    return False, "API key non autorizzata (403) — verifica le credenziali"
+                    return False, "API key non autorizzata (403) — verifica i permessi su aistudio.google.com"
                 if resp.status == 429:
-                    return False, "Rate limit raggiunto (429)"
-                return False, f"HTTP {resp.status}"
+                    return False, f"Limite richieste raggiunto (429) per {model}"
+                return False, f"Errore HTTP {resp.status}"
         except asyncio.TimeoutError:
-            return False, "Timeout connessione Gemini"
+            return False, "Timeout — Gemini non raggiungibile"
         except Exception as exc:
             return False, f"Connessione fallita: {exc}"
 
     async def _init_model(self) -> None:
-        """Valida il modello Gemini e applica fallback se necessario."""
-        ok, msg = await self._test_gemini_model(self.gemini_model)
+        """
+        Valida il modello selezionato dall'utente.
 
+        Logica:
+        1. Controlla internet (binary_sensor.8_8_8_8)
+        2. Testa il modello scelto dall'utente
+        3. Se fallisce → prova fallback (solo modelli gratuiti) con notifica
+        4. gemini_model = sempre la scelta dell'utente (non si tocca)
+           _active_model = modello realmente usato nelle chiamate API
+        """
+        # Step 1: Check internet
+        internet = self._check_internet()
+        if internet is False:
+            self.internet_status = "offline"
+            self.api_health = "Nessuna connessione internet"
+            self.ai_status = "offline"
+            self.last_error = f"HA non ha accesso a internet ({PING_ENTITY} offline)"
+            _LOGGER.error("HomeMind: %s", self.last_error)
+            return
+        self.internet_status = "online" if internet is True else "unknown"
+
+        # Step 2: Testa il modello scelto dall'utente
+        ok, msg = await self._test_gemini_model(self.gemini_model)
         if ok:
+            self._active_model = self.gemini_model
             self.api_health = f"Online — {self.gemini_model}"
             self.ai_status = "online"
             self.last_error = ""
-            _LOGGER.info("HomeMind: Gemini API OK (%s)", self.gemini_model)
+            _LOGGER.info("HomeMind: Gemini API OK con modello '%s'", self.gemini_model)
             return
 
-        # Modello configurato non disponibile — prova fallback
-        _LOGGER.warning("HomeMind: modello '%s' non disponibile (%s)", self.gemini_model, msg)
-        self.last_error = msg
+        # Step 3: Modello scelto non disponibile → fallback temporaneo
+        _LOGGER.warning(
+            "HomeMind: modello selezionato '%s' non disponibile — %s",
+            self.gemini_model, msg,
+        )
+        self.last_error = f"Modello '{self.gemini_model}': {msg}"
 
-        for fallback in GEMINI_FALLBACK_MODELS:
-            if fallback == self.gemini_model:
-                continue
+        fallbacks = [m for m in GEMINI_FALLBACK_ORDER if m != self.gemini_model]
+        for fallback in fallbacks:
             ok2, msg2 = await self._test_gemini_model(fallback)
             if ok2:
-                _LOGGER.warning(
-                    "HomeMind: fallback a '%s' (il modello '%s' non era disponibile)",
-                    fallback,
-                    self.gemini_model,
-                )
-                self.gemini_model = fallback
-                self.api_health = f"Online (fallback) — {fallback}"
+                # USA il fallback solo a runtime, NON modifica gemini_model
+                self._active_model = fallback
+                self.api_health = f"Fallback — {fallback} (selezionato: {self.gemini_model})"
                 self.ai_status = "online"
-                self.last_error = f"Modello originale non disponibile, uso {fallback}"
+                self.last_error = (
+                    f"Il modello '{self.gemini_model}' non è disponibile. "
+                    f"Uso temporaneamente '{fallback}'. "
+                    f"Motivo: {msg}"
+                )
+                _LOGGER.warning(
+                    "HomeMind: fallback temporaneo a '%s' (modello scelto '%s' non disponibile: %s)",
+                    fallback, self.gemini_model, msg,
+                )
+                # Notifica via bot (differita, il bot potrebbe non essere pronto ora)
+                if self.bot:
+                    self.hass.loop.create_task(
+                        self.bot.send_message(
+                            f"*Avviso modello AI*\n\n"
+                            f"Il modello selezionato `{self.gemini_model}` non è disponibile.\n"
+                            f"Uso temporaneamente `{fallback}` (gratuito).\n\n"
+                            f"Motivo: {msg}\n\n"
+                            f"Per cambiare modello: Impostazioni → Integrazioni → HomeMind AI → Configura."
+                        )
+                    )
                 return
 
         # Tutti i modelli falliti
-        self.api_health = f"Errore — {msg}"
+        self._active_model = self.gemini_model  # rimane il selezionato, ma ai_status = error
+        self.api_health = f"Errore — tutti i modelli non disponibili"
         self.ai_status = "error"
-        _LOGGER.error("HomeMind: tutti i modelli Gemini non disponibili. Ultimo errore: %s", msg)
+        self.last_error = f"Modello '{self.gemini_model}' e fallback non disponibili. {msg}"
+        _LOGGER.error("HomeMind: nessun modello Gemini disponibile. Ultimo errore: %s", msg)
 
     # ------------------------------------------------------------------ #
     # Callbacks sensori
@@ -452,7 +528,7 @@ class HomeMindCoordinator:
                 api_key=self.api_key,
                 image_bytes=image_bytes,
                 camera_name=camera_name,
-                model=self.gemini_model,
+                model=self._active_model,
             )
         except Exception as exc:
             self._set_error(f"Gemini Vision errore su {camera_name}: {exc}")
@@ -499,7 +575,7 @@ class HomeMindCoordinator:
             sec_eval = await ask_gemini_security(
                 session=session,
                 api_key=self.api_key,
-                model=self.gemini_model,
+                model=self._active_model,
                 camera_name=camera_name,
                 scene_description=analysis.get("description", "") + " " + analysis.get("summary", ""),
                 home_context=home_ctx,

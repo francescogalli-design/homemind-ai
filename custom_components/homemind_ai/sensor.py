@@ -29,6 +29,7 @@ async def async_setup_entry(
         HomeMindSensor(coordinator, "last_error",      "HomeMind Last Error",     "mdi:alert-circle",      None),
         HomeMindSensor(coordinator, "cameras_online",  "HomeMind Cameras Online", "mdi:cctv",              "cameras"),
         HomeMindSensor(coordinator, "bot_status",      "HomeMind Bot Status",     "mdi:send",              None),
+        HomeMindSensor(coordinator, "internet_status", "HomeMind Internet",        "mdi:web",               None),
     ]
 
     async_add_entities(entities)

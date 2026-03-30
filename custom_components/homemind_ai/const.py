@@ -1,7 +1,7 @@
 """Costanti per HomeMind AI."""
 
 DOMAIN = "homemind_ai"
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 
 # ---- Configurazione ----
 CONF_GEMINI_API_KEY = "gemini_api_key"
@@ -20,8 +20,12 @@ GEMINI_MODELS = [
     "gemini-1.5-flash",
     "gemini-1.5-pro",
 ]
-GEMINI_FALLBACK_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"]
+# Fallback solo su modelli gratuiti, nell'ordine in cui provarli
+GEMINI_FALLBACK_ORDER = ["gemini-2.0-flash", "gemini-1.5-flash"]
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+
+# Entità ping HA per check connessione internet
+PING_ENTITY = "binary_sensor.8_8_8_8"
 
 # ---- Default ----
 DEFAULT_NIGHT_START = 22
@@ -41,6 +45,7 @@ SENSOR_API_HEALTH = "api_health"
 SENSOR_LAST_ERROR = "last_error"
 SENSOR_CAMERAS_ONLINE = "cameras_online"
 SENSOR_BOT_STATUS = "bot_status"
+SENSOR_INTERNET_STATUS = "internet_status"
 
 # ---- Servizi ----
 SERVICE_ANALYZE_CAMERA = "analyze_camera"

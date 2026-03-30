@@ -13,6 +13,10 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    AI_PROVIDER_GEMINI,
+    AI_PROVIDER_HA_GEMINI,
+    AI_PROVIDER_OLLAMA,
+    CONF_AI_PROVIDER,
     CONF_CAMERAS,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_MODEL,
@@ -20,12 +24,17 @@ from .const import (
     CONF_MOTION_SENSORS,
     CONF_NIGHT_END,
     CONF_NIGHT_START,
+    CONF_OLLAMA_HOST,
+    CONF_OLLAMA_MODEL,
     CONF_TELEGRAM_CHAT_ID,
     CONF_TELEGRAM_TOKEN,
+    DEFAULT_AI_PROVIDER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_MORNING_REPORT_HOUR,
     DEFAULT_NIGHT_END,
     DEFAULT_NIGHT_START,
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_OLLAMA_MODEL,
     DOMAIN,
     GEMINI_FALLBACK_ORDER,
     PING_ENTITY,
@@ -79,17 +88,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not question:
             return
         from .ha_context import build_home_context
-        from .ai_provider import ask_gemini
-
         context = build_home_context(hass, cameras=await coordinator._get_cameras())
         session = async_get_clientsession(hass)
-        answer = await ask_gemini(
-            session=session,
-            api_key=coordinator.api_key,
-            model=coordinator._active_model,
-            question=question,
-            home_context=context,
-        )
+
+        if coordinator.ai_provider == AI_PROVIDER_HA_GEMINI:
+            from .ha_gemini_provider import ask_ha_gemini
+            answer = await ask_ha_gemini(hass, question, context)
+        elif coordinator.ai_provider == AI_PROVIDER_OLLAMA:
+            from .ollama_provider import ask_ollama
+            answer = await ask_ollama(session, coordinator.ollama_host, coordinator._active_model, question, context)
+        else:
+            from .ai_provider import ask_gemini
+            answer = await ask_gemini(
+                session=session,
+                api_key=coordinator.api_key,
+                model=coordinator._active_model,
+                question=question,
+                home_context=context,
+            )
+
         coordinator.last_ai_answer = answer[:255]
         coordinator._notify_sensors()
         if coordinator.bot:
@@ -136,9 +153,12 @@ class HomeMindCoordinator:
 
         cfg = {**entry.data, **entry.options}
 
-        # Configurazione
-        self.api_key: str = cfg.get(CONF_GEMINI_API_KEY, "")
+        # Configurazione provider AI
+        self.ai_provider: str = cfg.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER)
+        self.api_key: str = cfg.get(CONF_GEMINI_API_KEY, "").strip()
         self.gemini_model: str = cfg.get(CONF_GEMINI_MODEL, DEFAULT_GEMINI_MODEL)
+        self.ollama_host: str = cfg.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST).rstrip("/")
+        self.ollama_model: str = cfg.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
         self.telegram_token: str = cfg.get(CONF_TELEGRAM_TOKEN, "")
         self.telegram_chat_id: str = str(cfg.get(CONF_TELEGRAM_CHAT_ID, "")).strip()
         self.configured_cameras: list[str] = cfg.get(CONF_CAMERAS, [])
@@ -200,9 +220,9 @@ class HomeMindCoordinator:
 
         self._monitor_task = self.hass.loop.create_task(self._startup_sequence())
         _LOGGER.info(
-            "HomeMind AI: avvio — camere=%d, modello=%s, bot=%s",
+            "HomeMind AI: avvio — camere=%d, provider=%s, bot=%s",
             len(self.configured_cameras),
-            self.gemini_model,
+            self.ai_provider,
             self.bot_status,
         )
 
@@ -246,11 +266,16 @@ class HomeMindCoordinator:
         if self.bot:
             if self.ai_status == "online":
                 cams = await self._get_cameras()
+                provider_label = {
+                    AI_PROVIDER_HA_GEMINI: "Google Gemini (integrazione HA)",
+                    AI_PROVIDER_OLLAMA: f"Ollama — {self._active_model}",
+                    AI_PROVIDER_GEMINI: self._active_model
+                        + (f" _(fallback da {self.gemini_model})_" if self._active_model != self.gemini_model else ""),
+                }.get(self.ai_provider, self._active_model)
                 await self.bot.send_message(
                     f"*HomeMind AI* avviato\n\n"
-                    f"Modello  {self._active_model}"
-                    + (f" _(fallback da {self.gemini_model})_" if self._active_model != self.gemini_model else "")
-                    + f"\nTelecamere  {len(cams) if cams else 'autodetect'}\n"
+                    f"AI  {provider_label}\n"
+                    f"Telecamere  {len(cams) if cams else 'autodetect'}\n"
                     f"Notte  {self.night_start}:00 — {self.night_end}:00\n\n"
                     f"Scrivi /help per i comandi."
                 )
@@ -308,15 +333,58 @@ class HomeMindCoordinator:
 
     async def _init_model(self) -> None:
         """
-        Valida il modello selezionato dall'utente.
+        Valida il provider AI configurato.
 
-        Logica:
-        1. Controlla internet (binary_sensor.8_8_8_8)
-        2. Testa il modello scelto dall'utente
-        3. Se fallisce → prova fallback (solo modelli gratuiti) con notifica
-        4. gemini_model = sempre la scelta dell'utente (non si tocca)
-           _active_model = modello realmente usato nelle chiamate API
+        Provider supportati:
+        - ha_gemini : usa l'integrazione HA google_generative_ai_conversation (consigliato)
+        - gemini    : chiamate REST dirette (richiede API key AI Studio)
+        - ollama    : Ollama locale (nessuna API key)
         """
+        # ----------------------------------------------------------------
+        # Provider: HA Gemini integration (usa l'integrazione già in HA)
+        # ----------------------------------------------------------------
+        if self.ai_provider == AI_PROVIDER_HA_GEMINI:
+            from .ha_gemini_provider import test_ha_gemini
+            ok, msg = await test_ha_gemini(self.hass)
+            if ok:
+                self._active_model = "ha_gemini"
+                self.api_health = f"Online — Google Gemini (integrazione HA)"
+                self.ai_status = "online"
+                self.last_error = ""
+                self.internet_status = "online"
+                _LOGGER.info("HomeMind: provider HA Gemini OK — %s", msg)
+            else:
+                self._active_model = "ha_gemini"
+                self.api_health = f"Errore — {msg[:80]}"
+                self.ai_status = "error"
+                self.last_error = msg
+                _LOGGER.error("HomeMind: HA Gemini non disponibile — %s", msg)
+            return
+
+        # ----------------------------------------------------------------
+        # Provider: Ollama locale
+        # ----------------------------------------------------------------
+        if self.ai_provider == AI_PROVIDER_OLLAMA:
+            from .ollama_provider import test_ollama
+            session = async_get_clientsession(self.hass)
+            ok, msg = await test_ollama(session, self.ollama_host, self.ollama_model)
+            if ok:
+                self._active_model = self.ollama_model
+                self.api_health = f"Online — Ollama ({self.ollama_model})"
+                self.ai_status = "online"
+                self.last_error = ""
+                _LOGGER.info("HomeMind: Ollama OK — %s", msg)
+            else:
+                self._active_model = self.ollama_model
+                self.api_health = f"Errore Ollama — {msg[:80]}"
+                self.ai_status = "error"
+                self.last_error = msg
+                _LOGGER.error("HomeMind: Ollama non disponibile — %s", msg)
+            return
+
+        # ----------------------------------------------------------------
+        # Provider: Gemini REST diretto
+        # ----------------------------------------------------------------
         # Step 1: Check internet
         internet = self._check_internet()
         if internet is False:
@@ -335,14 +403,11 @@ class HomeMindCoordinator:
             self.api_health = f"Online — {self.gemini_model}"
             self.ai_status = "online"
             self.last_error = ""
-            _LOGGER.info("HomeMind: Gemini API OK con modello '%s'", self.gemini_model)
+            _LOGGER.info("HomeMind: Gemini REST OK con modello '%s'", self.gemini_model)
             return
 
-        # Step 3: Modello scelto non disponibile → fallback temporaneo
-        _LOGGER.warning(
-            "HomeMind: modello selezionato '%s' non disponibile — %s",
-            self.gemini_model, msg,
-        )
+        # Step 3: Fallback temporaneo
+        _LOGGER.warning("HomeMind: modello '%s' non disponibile — %s", self.gemini_model, msg)
         self.last_error = f"Modello '{self.gemini_model}': {msg}"
 
         fallbacks = [m for m in GEMINI_FALLBACK_ORDER if m != self.gemini_model]
@@ -352,7 +417,6 @@ class HomeMindCoordinator:
             ok2, msg2 = await self._test_gemini_model(fallback)
             fallback_errors.append(f"{fallback}: {msg2}")
             if ok2:
-                # USA il fallback solo a runtime, NON modifica gemini_model
                 self._active_model = fallback
                 self.api_health = f"Fallback — {fallback} (selezionato: {self.gemini_model})"
                 self.ai_status = "online"
@@ -360,33 +424,30 @@ class HomeMindCoordinator:
                     f"Il modello '{self.gemini_model}' non è disponibile. "
                     f"Uso temporaneamente '{fallback}'. Motivo: {msg}"
                 )
-                _LOGGER.warning(
-                    "HomeMind: fallback temporaneo a '%s' (modello scelto '%s' non disponibile: %s)",
-                    fallback, self.gemini_model, msg,
-                )
-                # Notifica via bot (differita, il bot potrebbe non essere pronto ora)
+                _LOGGER.warning("HomeMind: fallback a '%s'", fallback)
                 if self.bot:
                     self.hass.loop.create_task(
                         self.bot.send_message(
                             f"*Avviso modello AI*\n\n"
-                            f"Il modello selezionato `{self.gemini_model}` non è disponibile.\n"
-                            f"Uso temporaneamente `{fallback}` (gratuito).\n\n"
+                            f"Il modello `{self.gemini_model}` non è disponibile.\n"
+                            f"Uso temporaneamente `{fallback}`.\n\n"
                             f"Motivo: {msg}\n\n"
-                            f"Per cambiare modello: Impostazioni → Integrazioni → HomeMind AI → Configura."
+                            f"Cambia provider in Impostazioni → HomeMind AI → Configura."
                         )
                     )
                 return
 
-        # Tutti i modelli falliti — mostra errore dettagliato per ogni modello
+        # Tutti i modelli falliti
         self._active_model = self.gemini_model
         self.api_health = "Errore — nessun modello disponibile"
         self.ai_status = "error"
-        detail = " | ".join(fallback_errors[:3])  # max 3 per leggibilità
-        self.last_error = f"Nessun modello disponibile. Dettaglio: {detail}"
-        _LOGGER.error(
-            "HomeMind: nessun modello Gemini disponibile. Errori: %s",
-            " | ".join(fallback_errors),
+        detail = " | ".join(fallback_errors[:3])
+        self.last_error = (
+            f"Nessun modello Gemini disponibile. "
+            f"Prova a usare il provider 'ha_gemini' se hai l'integrazione HA attiva. "
+            f"Dettaglio: {detail}"
         )
+        _LOGGER.error("HomeMind: nessun modello Gemini disponibile. %s", " | ".join(fallback_errors))
 
     # ------------------------------------------------------------------ #
     # Callbacks sensori
@@ -529,15 +590,33 @@ class HomeMindCoordinator:
         )
 
         try:
-            analysis = await analyze_camera_image(
-                session=session,
-                api_key=self.api_key,
-                image_bytes=image_bytes,
-                camera_name=camera_name,
-                model=self._active_model,
-            )
+            if self.ai_provider == AI_PROVIDER_HA_GEMINI:
+                from .ha_gemini_provider import analyze_camera_image_ha_gemini
+                analysis = await analyze_camera_image_ha_gemini(
+                    hass=self.hass,
+                    image_bytes=image_bytes,
+                    camera_name=camera_name,
+                )
+            elif self.ai_provider == AI_PROVIDER_OLLAMA:
+                from .ollama_provider import analyze_camera_image_ollama
+                analysis = await analyze_camera_image_ollama(
+                    session=session,
+                    host=self.ollama_host,
+                    model=self._active_model,
+                    image_bytes=image_bytes,
+                    camera_name=camera_name,
+                )
+            else:
+                # Gemini REST diretto
+                analysis = await analyze_camera_image(
+                    session=session,
+                    api_key=self.api_key,
+                    image_bytes=image_bytes,
+                    camera_name=camera_name,
+                    model=self._active_model,
+                )
         except Exception as exc:
-            self._set_error(f"Gemini Vision errore su {camera_name}: {exc}")
+            self._set_error(f"AI Vision errore su {camera_name}: {exc}")
             return None
 
         # Gestione errori API dall'analisi
@@ -576,16 +655,36 @@ class HomeMindCoordinator:
         # Valutazione contestuale AI per MEDIUM/HIGH
         if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
             from .ha_context import build_home_context
-            from .ai_provider import ask_gemini_security
             home_ctx = build_home_context(self.hass, cameras=await self._get_cameras())
-            sec_eval = await ask_gemini_security(
-                session=session,
-                api_key=self.api_key,
-                model=self._active_model,
-                camera_name=camera_name,
-                scene_description=analysis.get("description", "") + " " + analysis.get("summary", ""),
-                home_context=home_ctx,
-            )
+            scene_desc = analysis.get("description", "") + " " + analysis.get("summary", "")
+            if self.ai_provider == AI_PROVIDER_HA_GEMINI:
+                from .ha_gemini_provider import ask_ha_gemini_security
+                sec_eval = await ask_ha_gemini_security(
+                    hass=self.hass,
+                    camera_name=camera_name,
+                    scene_description=scene_desc,
+                    home_context=home_ctx,
+                )
+            elif self.ai_provider == AI_PROVIDER_OLLAMA:
+                from .ollama_provider import ask_ollama_security
+                sec_eval = await ask_ollama_security(
+                    session=session,
+                    host=self.ollama_host,
+                    model=self._active_model,
+                    camera_name=camera_name,
+                    scene_description=scene_desc,
+                    home_context=home_ctx,
+                )
+            else:
+                from .ai_provider import ask_gemini_security
+                sec_eval = await ask_gemini_security(
+                    session=session,
+                    api_key=self.api_key,
+                    model=self._active_model,
+                    camera_name=camera_name,
+                    scene_description=scene_desc,
+                    home_context=home_ctx,
+                )
             if sec_eval:
                 analysis["security_evaluation"] = sec_eval
                 if "normale" in sec_eval.lower() and "falso allarme" in sec_eval.lower():

@@ -2,47 +2,56 @@
   "config": {
     "step": {
       "user": {
-        "title": "HomeMind AI — API & Telegram",
-        "description": "Configure API keys and Telegram credentials for HomeMind AI.",
+        "title": "HomeMind AI — Provider AI e Telegram",
+        "description": "Scegli il provider AI. Se hai già l'integrazione 'Google Generative AI Conversation' in HA, usa 'ha_gemini' — nessuna API key aggiuntiva richiesta.",
         "data": {
-          "gemini_api_key": "Gemini API Key",
-          "gemini_model": "Gemini Model",
-          "telegram_token": "Telegram Bot Token (optional)",
-          "telegram_chat_id": "Telegram Chat ID (optional)"
+          "ai_provider": "Provider AI",
+          "gemini_api_key": "Gemini API Key (solo per provider 'gemini')",
+          "gemini_model": "Modello Gemini (solo per provider 'gemini')",
+          "ollama_host": "Ollama Host (es. http://localhost:11434)",
+          "ollama_model": "Modello Ollama (es. llava)",
+          "telegram_token": "Telegram Bot Token (opzionale)",
+          "telegram_chat_id": "Telegram Chat ID (opzionale)"
         }
       },
       "cameras": {
-        "title": "HomeMind AI — Cameras & Monitoring",
-        "description": "Select cameras to monitor and motion sensors. Leave empty for auto-detection.",
+        "title": "HomeMind AI — Telecamere e Monitoraggio",
+        "description": "Seleziona le telecamere da monitorare e i sensori di movimento. Lascia vuoto per il rilevamento automatico.",
         "data": {
-          "cameras": "Cameras to monitor",
-          "motion_sensors": "Motion sensors (optional)",
-          "night_start": "Night monitoring start hour (0-23)",
-          "night_end": "Night monitoring end hour (0-23)",
-          "morning_report_hour": "Morning report hour (0-23)"
+          "cameras": "Telecamere da monitorare",
+          "motion_sensors": "Sensori di movimento (opzionale)",
+          "night_start": "Inizio monitoraggio notturno (ora 0-23)",
+          "night_end": "Fine monitoraggio notturno (ora 0-23)",
+          "morning_report_hour": "Ora report mattutino (ora 0-23)"
         }
       }
     },
     "error": {
-      "api_key_required": "Gemini API Key is required."
+      "api_key_required": "La Gemini API Key è obbligatoria per il provider 'gemini'.",
+      "ollama_host_required": "L'indirizzo Ollama è obbligatorio per il provider 'ollama'."
     },
     "abort": {
-      "already_configured": "HomeMind AI is already configured."
+      "already_configured": "HomeMind AI è già configurato."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "HomeMind AI — Options",
+        "title": "HomeMind AI — Opzioni",
+        "description": "Usa 'ha_gemini' per evitare conflitti se Google Generative AI è già configurato in HA.",
         "data": {
-          "gemini_model": "Gemini Model",
+          "ai_provider": "Provider AI",
+          "gemini_api_key": "Gemini API Key (solo per provider 'gemini')",
+          "gemini_model": "Modello Gemini",
+          "ollama_host": "Ollama Host",
+          "ollama_model": "Modello Ollama",
           "telegram_token": "Telegram Bot Token",
           "telegram_chat_id": "Telegram Chat ID",
-          "cameras": "Cameras to monitor",
-          "motion_sensors": "Motion sensors",
-          "night_start": "Night monitoring start hour (0-23)",
-          "night_end": "Night monitoring end hour (0-23)",
-          "morning_report_hour": "Morning report hour (0-23)"
+          "cameras": "Telecamere da monitorare",
+          "motion_sensors": "Sensori di movimento",
+          "night_start": "Inizio monitoraggio notturno (ora 0-23)",
+          "night_end": "Fine monitoraggio notturno (ora 0-23)",
+          "morning_report_hour": "Ora report mattutino (ora 0-23)"
         }
       }
     }

@@ -1,11 +1,17 @@
 """Costanti per HomeMind AI."""
 
 DOMAIN = "homemind_ai"
-VERSION = "2.1.2"
+VERSION = "2.2.0"
+
+# ---- Dominio integrazione HA Gemini ----
+HA_GEMINI_DOMAIN = "google_generative_ai_conversation"
 
 # ---- Configurazione ----
+CONF_AI_PROVIDER = "ai_provider"
 CONF_GEMINI_API_KEY = "gemini_api_key"
 CONF_GEMINI_MODEL = "gemini_model"
+CONF_OLLAMA_HOST = "ollama_host"
+CONF_OLLAMA_MODEL = "ollama_model"
 CONF_TELEGRAM_TOKEN = "telegram_token"
 CONF_TELEGRAM_CHAT_ID = "telegram_chat_id"
 CONF_CAMERAS = "cameras"
@@ -13,6 +19,13 @@ CONF_MOTION_SENSORS = "motion_sensors"
 CONF_NIGHT_START = "night_start"
 CONF_NIGHT_END = "night_end"
 CONF_MORNING_REPORT_HOUR = "morning_report_hour"
+
+# ---- Provider AI ----
+AI_PROVIDER_GEMINI = "gemini"           # Chiamate REST dirette all'API Gemini
+AI_PROVIDER_HA_GEMINI = "ha_gemini"     # Usa l'integrazione HA Google Generative AI (consigliato)
+AI_PROVIDER_OLLAMA = "ollama"           # Ollama locale
+AI_PROVIDERS = [AI_PROVIDER_HA_GEMINI, AI_PROVIDER_GEMINI, AI_PROVIDER_OLLAMA]
+DEFAULT_AI_PROVIDER = AI_PROVIDER_HA_GEMINI  # Default: usa integrazione HA se presente
 
 # ---- Modelli Gemini ----
 GEMINI_MODELS = [
@@ -30,6 +43,10 @@ GEMINI_FALLBACK_ORDER = [
     "gemini-1.5-flash-8b",
 ]
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+
+# ---- Ollama ----
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "llava"
 
 # Entità ping HA per check connessione internet
 PING_ENTITY = "binary_sensor.8_8_8_8"

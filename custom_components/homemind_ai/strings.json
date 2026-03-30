@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HomeMind AI — Configurazione",
+        "description": "Configura HomeMind AI per il monitoraggio sicurezza con Gemini Vision.",
+        "data": {
+          "gemini_api_key": "Gemini API Key",
+          "gemini_model": "Modello Gemini",
+          "telegram_token": "Telegram Bot Token (opzionale)",
+          "telegram_chat_id": "Telegram Chat ID (opzionale)",
+          "night_start": "Inizio monitoraggio notturno (ora 0-23)",
+          "night_end": "Fine monitoraggio notturno (ora 0-23)",
+          "morning_report_hour": "Ora report mattutino (ora 0-23)"
+        }
+      }
+    },
+    "error": {
+      "api_key_required": "La Gemini API Key è obbligatoria."
+    },
+    "abort": {
+      "already_configured": "HomeMind AI è già configurato."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HomeMind AI — Opzioni",
+        "data": {
+          "gemini_model": "Modello Gemini",
+          "telegram_token": "Telegram Bot Token",
+          "telegram_chat_id": "Telegram Chat ID",
+          "night_start": "Inizio monitoraggio notturno (ora 0-23)",
+          "night_end": "Fine monitoraggio notturno (ora 0-23)",
+          "morning_report_hour": "Ora report mattutino (ora 0-23)"
+        }
+      }
+    }
+  }
+}

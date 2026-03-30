@@ -14,6 +14,13 @@ CONF_NIGHT_START = "night_start"
 CONF_NIGHT_END = "night_end"
 CONF_MORNING_REPORT_HOUR = "morning_report_hour"
 
+# Modelli Gemini disponibili
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+]
+
 # Default
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 DEFAULT_NIGHT_START = 22

@@ -152,19 +152,11 @@ class HomeMindCoordinator:
         ]
 
     async def _get_camera_snapshot(self, entity_id: str) -> bytes | None:
-        """Scarica snapshot JPEG dalla camera via HA."""
+        """Scarica snapshot JPEG dalla camera usando l'API nativa di HA."""
         try:
-            session = async_get_clientsession(self.hass)
-            ha_url = self.hass.config.api.base_url if self.hass.config.api else "http://localhost:8123"
-            token = self.hass.auth.async_create_access_token  # type: ignore[attr-defined]
-            # Usa il token interno di HA
-            headers = {"Authorization": f"Bearer {self.hass.data.get('homemind_ha_token', '')}"}
-            url = f"{ha_url}/api/camera_proxy/{entity_id}"
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    return await resp.read()
-                _LOGGER.warning("Snapshot %s: HTTP %s", entity_id, resp.status)
-                return None
+            from homeassistant.components.camera import async_get_image
+            image = await async_get_image(self.hass, entity_id, timeout=10)
+            return image.content
         except Exception as exc:
             _LOGGER.error("Errore snapshot %s: %s", entity_id, exc)
             return None

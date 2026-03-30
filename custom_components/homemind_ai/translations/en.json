@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HomeMind AI — Setup",
+        "description": "Configure HomeMind AI for proactive security monitoring with Gemini Vision.",
+        "data": {
+          "gemini_api_key": "Gemini API Key",
+          "gemini_model": "Gemini Model",
+          "telegram_token": "Telegram Bot Token (optional)",
+          "telegram_chat_id": "Telegram Chat ID (optional)",
+          "night_start": "Night monitoring start hour (0-23)",
+          "night_end": "Night monitoring end hour (0-23)",
+          "morning_report_hour": "Morning report hour (0-23)"
+        }
+      }
+    },
+    "error": {
+      "api_key_required": "Gemini API Key is required."
+    },
+    "abort": {
+      "already_configured": "HomeMind AI is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HomeMind AI — Options",
+        "data": {
+          "gemini_model": "Gemini Model",
+          "telegram_token": "Telegram Bot Token",
+          "telegram_chat_id": "Telegram Chat ID",
+          "night_start": "Night monitoring start hour (0-23)",
+          "night_end": "Night monitoring end hour (0-23)",
+          "morning_report_hour": "Morning report hour (0-23)"
+        }
+      }
+    }
+  }
+}

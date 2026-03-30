@@ -27,6 +27,7 @@ from .const import (
     DEFAULT_NIGHT_END,
     DEFAULT_NIGHT_START,
     DOMAIN,
+    GEMINI_FALLBACK_MODELS,
     SERVICE_ANALYZE_CAMERA,
     SERVICE_ASK_AI,
     SERVICE_CLEAR_ALERTS,
@@ -41,6 +42,8 @@ from .telegram_bot import TelegramBot
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR]
 
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Configura HomeMind AI da config entry."""
@@ -51,7 +54,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # ---- Registra servizi HA ----
     import voluptuous as vol
     from homeassistant.helpers import config_validation as cv
 
@@ -70,7 +72,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.alerts_tonight = 0
         coordinator.last_alert = ""
         coordinator._notify_sensors()
-        _LOGGER.info("HomeMind AI: alert notturni azzerati")
 
     async def handle_ask_ai(call: ServiceCall) -> None:
         question = call.data.get("question", "").strip()
@@ -88,10 +89,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             question=question,
             home_context=context,
         )
-        coordinator.last_ai_answer = answer
+        coordinator.last_ai_answer = answer[:255]
         coordinator._notify_sensors()
         if coordinator.bot:
-            await coordinator.bot.send_message(f"🤖 *HomeMind AI:*\n\n{answer}")
+            await coordinator.bot.send_message(answer)
 
     hass.services.async_register(
         DOMAIN,
@@ -108,46 +109,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         schema=vol.Schema({vol.Required("question"): str}),
     )
 
-    # Ricarica il coordinator quando le opzioni cambiano
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
-
-    # Avvia tutto
     coordinator.start()
     return True
 
 
 async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Ricarica l'integrazione quando le opzioni vengono aggiornate."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Rimuove HomeMind AI."""
     coordinator: HomeMindCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
     coordinator.stop()
-
     for service in (SERVICE_ANALYZE_CAMERA, SERVICE_GENERATE_REPORT, SERVICE_CLEAR_ALERTS, SERVICE_ASK_AI):
         hass.services.async_remove(DOMAIN, service)
-
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 class HomeMindCoordinator:
-    """
-    Coordinatore principale di HomeMind AI.
-
-    Gestisce:
-    - Loop di monitoraggio sicurezza proattivo
-    - Analisi camere con Gemini Vision
-    - Bot Telegram per query e comandi
-    - Sensori HA con stato in tempo reale
-    """
+    """Coordinatore principale di HomeMind AI."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
 
-        # Merge data + options (options hanno priorità)
         cfg = {**entry.data, **entry.options}
 
         # Configurazione
@@ -161,27 +146,36 @@ class HomeMindCoordinator:
         self.night_end: int = cfg.get(CONF_NIGHT_END, DEFAULT_NIGHT_END)
         self.morning_report_hour: int = cfg.get(CONF_MORNING_REPORT_HOUR, DEFAULT_MORNING_REPORT_HOUR)
 
-        # Stato sensori esposti in HA
-        self.ai_status: str = "online"
+        # Stato sensori
+        self.ai_status: str = "starting"
         self.night_mode: str = "inactive"
         self.alerts_tonight: int = 0
         self.last_alert: str = ""
         self.last_report: str = ""
         self.last_ai_answer: str = ""
 
-        # Registro eventi sicurezza
+        # Debug sensori
+        self.api_health: str = "testing"
+        self.last_error: str = ""
+        self.cameras_online: int = 0
+        self.bot_status: str = "not_configured"
+
+        # Sicurezza
         self.night_events: list[dict] = []
         self._last_alert_times: dict[str, float] = {}
-        self._alert_cooldown: int = 300  # 5 minuti per camera
+        self._alert_cooldown: int = 300
 
-        # Tracciamento cross-camera (sicurezza proattiva avanzata)
-        self._recent_motion_cams: list[tuple[str, float]] = []  # (cam_id, timestamp)
-        self._cross_camera_window: int = 120  # 2 min finestra correlazione
+        # Cross-camera correlation
+        self._recent_motion_cams: list[tuple[str, float]] = []
+        self._cross_camera_window: int = 120
 
-        # Callbacks sensori
+        # Cache snapshot per invio foto bot
+        self._last_snapshots: dict[str, bytes] = {}
+
+        # Set camere non supportate (es. slideshow virtuali)
+        self._unsupported_cameras: set[str] = set()
+
         self._sensor_callbacks: list = []
-
-        # Componenti
         self.bot: TelegramBot | None = None
         self._monitor_task: asyncio.Task | None = None
 
@@ -190,33 +184,130 @@ class HomeMindCoordinator:
     # ------------------------------------------------------------------ #
 
     def start(self) -> None:
-        """Avvia bot e loop di monitoraggio."""
-        # Bot Telegram
         if self.telegram_token and self.telegram_chat_id:
             self.bot = TelegramBot(self)
             self.bot.start()
+            self.bot_status = "connected"
         else:
-            _LOGGER.info("HomeMind: Telegram non configurato, solo alert in uscita disabilitati")
+            self.bot_status = "not_configured"
 
-        # Loop monitoraggio
-        self._monitor_task = self.hass.loop.create_task(self._monitor_loop())
+        self._monitor_task = self.hass.loop.create_task(self._startup_sequence())
         _LOGGER.info(
-            "HomeMind AI avviato: camere=%d, modello=%s, bot=%s",
+            "HomeMind AI: avvio — camere=%d, modello=%s, bot=%s",
             len(self.configured_cameras),
             self.gemini_model,
-            "attivo" if self.bot else "non configurato",
+            self.bot_status,
         )
 
     def stop(self) -> None:
-        """Ferma tutto."""
         if self.bot:
             self.bot.stop()
         if self._monitor_task:
             self._monitor_task.cancel()
-        _LOGGER.info("HomeMind AI fermato")
 
     # ------------------------------------------------------------------ #
-    # Sensor callbacks
+    # Startup: test API → avvia monitoraggio
+    # ------------------------------------------------------------------ #
+
+    async def _startup_sequence(self) -> None:
+        """Testa API Gemini poi avvia il loop principale."""
+        await asyncio.sleep(3)  # Attendi che HA sia pronto
+        await self._init_model()
+        self._notify_sensors()
+
+        if self.bot and self.ai_status == "online":
+            cams = await self._get_cameras()
+            cam_count = len(cams)
+            await self.bot.send_message(
+                f"*HomeMind AI* avviato\n\n"
+                f"Modello  {self.gemini_model}\n"
+                f"Telecamere  {cam_count if cam_count else 'autodetect'}\n"
+                f"Notte  {self.night_start}:00 — {self.night_end}:00\n\n"
+                f"Scrivi /help per i comandi."
+            )
+        elif self.bot and self.ai_status == "error":
+            await self.bot.send_message(
+                f"*HomeMind AI* — errore API\n\n"
+                f"{self.last_error}\n\n"
+                f"Verifica la Gemini API key nelle impostazioni."
+            )
+
+        await self._monitor_loop()
+
+    async def _test_gemini_model(self, model: str) -> tuple[bool, str]:
+        """Testa un modello Gemini con una richiesta minimale. Returns (ok, message)."""
+        session = async_get_clientsession(self.hass)
+        url = _GEMINI_URL.format(model=model)
+        payload = {
+            "contents": [{"parts": [{"text": "Test."}]}],
+            "generationConfig": {"maxOutputTokens": 5},
+        }
+        try:
+            async with session.post(
+                f"{url}?key={self.api_key}",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    return True, f"Online — {model}"
+                body = await resp.text()
+                if resp.status == 404:
+                    return False, f"Modello '{model}' non trovato (404)"
+                if resp.status == 400:
+                    import json as _json
+                    try:
+                        err = _json.loads(body).get("error", {}).get("message", body[:80])
+                    except Exception:
+                        err = body[:80]
+                    return False, f"Errore API: {err}"
+                if resp.status == 403:
+                    return False, "API key non autorizzata (403) — verifica le credenziali"
+                if resp.status == 429:
+                    return False, "Rate limit raggiunto (429)"
+                return False, f"HTTP {resp.status}"
+        except asyncio.TimeoutError:
+            return False, "Timeout connessione Gemini"
+        except Exception as exc:
+            return False, f"Connessione fallita: {exc}"
+
+    async def _init_model(self) -> None:
+        """Valida il modello Gemini e applica fallback se necessario."""
+        ok, msg = await self._test_gemini_model(self.gemini_model)
+
+        if ok:
+            self.api_health = f"Online — {self.gemini_model}"
+            self.ai_status = "online"
+            self.last_error = ""
+            _LOGGER.info("HomeMind: Gemini API OK (%s)", self.gemini_model)
+            return
+
+        # Modello configurato non disponibile — prova fallback
+        _LOGGER.warning("HomeMind: modello '%s' non disponibile (%s)", self.gemini_model, msg)
+        self.last_error = msg
+
+        for fallback in GEMINI_FALLBACK_MODELS:
+            if fallback == self.gemini_model:
+                continue
+            ok2, msg2 = await self._test_gemini_model(fallback)
+            if ok2:
+                _LOGGER.warning(
+                    "HomeMind: fallback a '%s' (il modello '%s' non era disponibile)",
+                    fallback,
+                    self.gemini_model,
+                )
+                self.gemini_model = fallback
+                self.api_health = f"Online (fallback) — {fallback}"
+                self.ai_status = "online"
+                self.last_error = f"Modello originale non disponibile, uso {fallback}"
+                return
+
+        # Tutti i modelli falliti
+        self.api_health = f"Errore — {msg}"
+        self.ai_status = "error"
+        _LOGGER.error("HomeMind: tutti i modelli Gemini non disponibili. Ultimo errore: %s", msg)
+
+    # ------------------------------------------------------------------ #
+    # Callbacks sensori
     # ------------------------------------------------------------------ #
 
     def register_sensor_callback(self, callback) -> None:
@@ -229,40 +320,47 @@ class HomeMindCoordinator:
             except Exception as exc:
                 _LOGGER.debug("Sensor callback errore: %s", exc)
 
+    def _set_error(self, msg: str) -> None:
+        """Aggiorna last_error e notifica i sensori."""
+        self.last_error = msg[:200]
+        self.ai_status = "error"
+        self._notify_sensors()
+        _LOGGER.error("HomeMind: %s", msg)
+
     # ------------------------------------------------------------------ #
     # Camera discovery
     # ------------------------------------------------------------------ #
 
     async def _get_cameras(self) -> list[str]:
-        """Restituisce camere configurate o autodetect."""
         if self.configured_cameras:
-            # Filtra solo quelle che esistono ancora in HA
             return [
                 eid for eid in self.configured_cameras
                 if self.hass.states.get(eid) is not None
+                and eid not in self._unsupported_cameras
             ]
-        # Autodetect: tutte le camera.* presenti
-        return self.hass.states.async_entity_ids("camera")
+        return [
+            eid for eid in self.hass.states.async_entity_ids("camera")
+            if eid not in self._unsupported_cameras
+        ]
+
+    async def _get_all_cameras_raw(self) -> list[str]:
+        """Tutte le camere incluse quelle non supportate (per debug)."""
+        if self.configured_cameras:
+            return [eid for eid in self.configured_cameras if self.hass.states.get(eid)]
+        return list(self.hass.states.async_entity_ids("camera"))
 
     async def _get_motion_sensors(self) -> list[str]:
-        """Restituisce sensori movimento configurati o autodetect."""
         if self.configured_motion_sensors:
-            return [
-                eid for eid in self.configured_motion_sensors
-                if self.hass.states.get(eid) is not None
-            ]
-        # Autodetect: binary_sensor con device_class motion/occupancy
+            return [eid for eid in self.configured_motion_sensors if self.hass.states.get(eid)]
         sensors = []
         for eid in self.hass.states.async_entity_ids("binary_sensor"):
             state = self.hass.states.get(eid)
-            if state:
-                dc = state.attributes.get("device_class", "")
-                if dc in ("motion", "occupancy"):
-                    sensors.append(eid)
+            if state and state.attributes.get("device_class") in ("motion", "occupancy"):
+                sensors.append(eid)
         return sensors
 
     # ------------------------------------------------------------------ #
-    # Night window helpers
+    # Night / presence helpers
     # ------------------------------------------------------------------ #
 
     def _is_night_window(self) -> bool:
@@ -272,7 +370,6 @@ class HomeMindCoordinator:
         return self.night_start <= h < self.night_end
 
     def _everyone_away(self) -> bool:
-        """Controlla se tutti sono fuori casa."""
         person_ids = self.hass.states.async_entity_ids("person")
         if not person_ids:
             return False
@@ -283,32 +380,60 @@ class HomeMindCoordinator:
         return True
 
     # ------------------------------------------------------------------ #
-    # Camera snapshot
+    # Camera snapshot (con cache + rilevamento camere non supportate)
     # ------------------------------------------------------------------ #
 
     async def _get_camera_snapshot(self, entity_id: str) -> bytes | None:
+        """
+        Scarica snapshot dalla camera usando l'API nativa HA.
+
+        - Salva in cache _last_snapshots per invio foto bot.
+        - Marca come non supportata se ritorna errore persistente.
+        """
         try:
             from homeassistant.components.camera import async_get_image
             image = await async_get_image(self.hass, entity_id, timeout=10)
-            return image.content
+            if image and image.content and len(image.content) > 500:
+                self._last_snapshots[entity_id] = image.content
+                return image.content
+            # Immagine vuota o troppo piccola → camera non supportata
+            _LOGGER.warning(
+                "HomeMind: camera %s ritorna immagine vuota/non valida — probabilmente una camera virtuale. "
+                "Esclusa dal monitoraggio AI.",
+                entity_id,
+            )
+            self._unsupported_cameras.add(entity_id)
+            return None
         except Exception as exc:
-            _LOGGER.error("Snapshot errore %s: %s", entity_id, exc)
+            err_str = str(exc)
+            _LOGGER.warning("HomeMind: snapshot %s fallito: %s", entity_id, err_str)
+            # Non marcare come non supportata per errori temporanei di rete
+            if "not found" in err_str.lower() or "404" in err_str:
+                _LOGGER.warning(
+                    "HomeMind: camera %s restituisce 404 — camera virtuale o offline. "
+                    "Esclusa dal monitoraggio.",
+                    entity_id,
+                )
+                self._unsupported_cameras.add(entity_id)
             return None
 
     # ------------------------------------------------------------------ #
-    # Camera analysis — cuore della sicurezza proattiva
+    # Camera analysis
     # ------------------------------------------------------------------ #
 
     async def analyze_single_camera(self, entity_id: str) -> dict | None:
         """
-        Analizza una camera con Gemini Vision e invia alert se necessario.
+        Analizza una camera con Gemini Vision.
 
-        Sicurezza proattiva avanzata rispetto a HomeMind:
-        - Contesto casa completo (chi è a casa, ora, porte, sensori)
-        - Correlazione cross-camera: se 2+ camere attive in 2 min → escalation
-        - Valutazione contestuale con ask_gemini_security per MEDIUM/HIGH
-        - Alert immediato su Telegram con foto se minaccia confermata
+        - Snapshot cached in _last_snapshots per invio bot
+        - Cross-camera correlation
+        - Valutazione contestuale per MEDIUM/HIGH
+        - Alert Telegram con foto
         """
+        if self.ai_status == "error":
+            _LOGGER.debug("HomeMind: skip analisi, API in errore")
+            return None
+
         image_bytes = await self._get_camera_snapshot(entity_id)
         if not image_bytes:
             return None
@@ -318,54 +443,58 @@ class HomeMindCoordinator:
         camera_name = (
             state.attributes.get("friendly_name")
             or entity_id.replace("camera.", "").replace("_", " ").title()
-            if state
-            else entity_id
+            if state else entity_id
         )
 
-        analysis = await analyze_camera_image(
-            session=session,
-            api_key=self.api_key,
-            image_bytes=image_bytes,
-            camera_name=camera_name,
-            model=self.gemini_model,
-        )
+        try:
+            analysis = await analyze_camera_image(
+                session=session,
+                api_key=self.api_key,
+                image_bytes=image_bytes,
+                camera_name=camera_name,
+                model=self.gemini_model,
+            )
+        except Exception as exc:
+            self._set_error(f"Gemini Vision errore su {camera_name}: {exc}")
+            return None
+
+        # Gestione errori API dall'analisi
+        if analysis.get("error"):
+            err = analysis["error"]
+            self.last_error = f"{camera_name}: {err}"
+            self._notify_sensors()
+            _LOGGER.warning("HomeMind: analisi %s — %s", camera_name, err)
+            return analysis
 
         threat_level = analysis.get("threat_level", "none")
         threat_detected = analysis.get("threat_detected", False)
 
-        # ---- Cross-camera correlation (sicurezza proattiva) ----
+        # Cross-camera correlation
         now_ts = datetime.now().timestamp()
         if threat_detected or threat_level != "none":
             self._recent_motion_cams.append((entity_id, now_ts))
 
-        # Pulisci vecchi (fuori finestra)
         self._recent_motion_cams = [
-            (cid, ts)
-            for cid, ts in self._recent_motion_cams
+            (cid, ts) for cid, ts in self._recent_motion_cams
             if now_ts - ts <= self._cross_camera_window
         ]
 
-        # Se 2+ camere diverse hanno rilevato in finestra → escalation
         active_cams = {cid for cid, _ in self._recent_motion_cams}
         if len(active_cams) >= 2 and threat_level in ("low", "none"):
-            _LOGGER.warning(
-                "HomeMind: correlazione cross-camera (%s) → escalation a medium",
-                ", ".join(active_cams),
-            )
             analysis["threat_level"] = "medium"
             analysis["threat_detected"] = True
             analysis["summary"] = (
-                f"[ESCALATION] Movimento su {len(active_cams)} telecamere contemporaneamente. "
+                f"Movimento rilevato su {len(active_cams)} telecamere in 2 minuti. "
                 + analysis.get("summary", "")
             )
             threat_level = "medium"
             threat_detected = True
+            _LOGGER.warning("HomeMind: correlazione cross-camera → escalation medium")
 
-        # ---- Valutazione contestuale per MEDIUM/HIGH ----
+        # Valutazione contestuale AI per MEDIUM/HIGH
         if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
             from .ha_context import build_home_context
             from .ai_provider import ask_gemini_security
-
             home_ctx = build_home_context(self.hass, cameras=await self._get_cameras())
             sec_eval = await ask_gemini_security(
                 session=session,
@@ -377,13 +506,12 @@ class HomeMindCoordinator:
             )
             if sec_eval:
                 analysis["security_evaluation"] = sec_eval
-                # Se la valutazione dice "normale", abbassa il livello
                 if "normale" in sec_eval.lower() and "falso allarme" in sec_eval.lower():
-                    _LOGGER.info("HomeMind: valutazione contestuale → normale (falso allarme)")
                     analysis["threat_level"] = "low"
                     threat_level = "low"
+                    threat_detected = False
 
-        # ---- Aggiorna stato ----
+        # Aggiorna stato
         if threat_detected:
             self.alerts_tonight += 1
             self.last_alert = f"{camera_name}: {analysis.get('summary', '')}"
@@ -397,19 +525,10 @@ class HomeMindCoordinator:
             })
             self._notify_sensors()
 
-            # Alert Telegram con foto per MEDIUM/HIGH
             if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
-                await self._send_alert(entity_id, camera_name, analysis, image_bytes)
+                await self._send_security_alert(entity_id, camera_name, analysis, image_bytes)
 
-        elif threat_level == THREAT_LOW:
-            # Low threat: solo log, no alert
-            _LOGGER.info(
-                "HomeMind [%s]: rischio basso — %s",
-                camera_name,
-                analysis.get("summary", "")[:80],
-            )
-
-        # Spara evento HA per automazioni
+        # Evento HA per automazioni
         self.hass.bus.async_fire(
             "homemind_ai_alert",
             {
@@ -426,36 +545,17 @@ class HomeMindCoordinator:
 
         _LOGGER.info(
             "HomeMind [%s] rischio=%s | %s",
-            camera_name,
-            threat_level,
-            analysis.get("summary", "")[:80],
+            camera_name, threat_level, analysis.get("summary", "")[:80],
         )
         return analysis
 
     # ------------------------------------------------------------------ #
-    # Monitor loop — sicurezza proattiva continua
+    # Monitor loop
     # ------------------------------------------------------------------ #
 
     async def _monitor_loop(self) -> None:
-        """
-        Loop principale di monitoraggio sicurezza.
-
-        Strategia proattiva:
-        - Notte: analisi ogni 120s o al trigger movimento
-        - Giorno + tutti fuori: analisi ogni 180s
-        - Giorno + qualcuno a casa: solo trigger movimento, scan ogni 600s
-        - Cooldown 5 min per camera dopo alert
-        """
         morning_report_sent_date: str = ""
-        # Messaggio di avvio
-        if self.bot:
-            await asyncio.sleep(5)  # Attendi che il bot sia pronto
-            await self.bot.send_message(
-                "🏠 *HomeMind AI avviato*\n"
-                f"📷 Telecamere: {len(self.configured_cameras) or 'autodetect'}\n"
-                f"🌙 Monitoraggio notturno: {self.night_start}:00 → {self.night_end}:00\n"
-                "💬 Scrivi /help per i comandi disponibili."
-            )
+        cameras_checked: int = 0
 
         while True:
             try:
@@ -464,7 +564,7 @@ class HomeMindCoordinator:
                 in_night = self._is_night_window()
                 everyone_away = self._everyone_away()
 
-                # Aggiorna night_mode
+                # Night mode
                 new_mode = "active" if in_night else "inactive"
                 if self.night_mode != new_mode:
                     self.night_mode = new_mode
@@ -472,11 +572,11 @@ class HomeMindCoordinator:
                     if self.bot:
                         if in_night:
                             await self.bot.send_message(
-                                f"🌙 *Monitoraggio notturno attivo*\n"
-                                f"Dalle {now.strftime('%H:%M')} — scansione camere ogni 2 minuti."
+                                f"*Monitoraggio notturno attivo*\n"
+                                f"Dalle {now.strftime('%H:%M')} — scansione ogni 2 minuti."
                             )
                         else:
-                            await self.bot.send_message("🌅 Monitoraggio notturno terminato.")
+                            await self.bot.send_message("Monitoraggio notturno terminato.")
 
                 # Report mattutino
                 today = now.strftime("%Y-%m-%d")
@@ -484,62 +584,45 @@ class HomeMindCoordinator:
                     await self.send_morning_report()
                     morning_report_sent_date = today
 
-                # Determina camere da analizzare
+                # Analisi camere
                 cameras = await self._get_cameras()
                 motion_sensors = await self._get_motion_sensors()
+                cameras_checked = 0
 
                 for cam_id in cameras:
                     last_ts = self._last_alert_times.get(cam_id, 0)
                     if (now_ts - last_ts) < self._alert_cooldown:
-                        continue  # In cooldown
+                        continue
 
-                    # Controlla trigger movimento associato
                     cam_slug = cam_id.replace("camera.", "").lower()
                     motion_triggered = self._is_motion_triggered(cam_id, cam_slug, motion_sensors)
 
-                    # Logica di scansione proattiva
-                    should_analyze = (
-                        motion_triggered
-                        or in_night
-                        or everyone_away  # Casa vuota → sempre attento
-                    )
+                    should_analyze = motion_triggered or in_night or everyone_away
 
                     if should_analyze:
                         result = await self.analyze_single_camera(cam_id)
+                        cameras_checked += 1
                         if result and result.get("threat_detected"):
                             self._last_alert_times[cam_id] = now_ts
 
-                # Intervallo sleep adattivo
-                if in_night:
-                    sleep = 120       # notte: ogni 2 min
-                elif everyone_away:
-                    sleep = 180       # casa vuota: ogni 3 min
-                else:
-                    sleep = 600       # tutti a casa di giorno: ogni 10 min
+                # Aggiorna cameras_online
+                self.cameras_online = len(cameras)
+                self._notify_sensors()
 
+                sleep = 120 if in_night else (180 if everyone_away else 600)
                 await asyncio.sleep(sleep)
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                _LOGGER.error("HomeMind monitor errore: %s", exc)
-                self.ai_status = "error"
-                self._notify_sensors()
+                self._set_error(f"Monitor loop: {exc}")
                 await asyncio.sleep(60)
 
     def _is_motion_triggered(self, cam_id: str, cam_slug: str, motion_sensors: list[str]) -> bool:
-        """
-        Controlla se c'è movimento associato alla camera.
-
-        Strategia di matching:
-        1. Sensori configurati esplicitamente con nome simile alla camera
-        2. Qualsiasi sensore movimento attivo (se in modalità notturna o tutti fuori)
-        """
         for sensor_id in motion_sensors:
             state = self.hass.states.get(sensor_id)
             if not state or state.state != "on":
                 continue
-            # Match per slug: camera.ingresso ↔ binary_sensor.ingresso_motion
             sensor_slug = sensor_id.replace("binary_sensor.", "").lower()
             if (
                 cam_slug in sensor_slug
@@ -550,78 +633,77 @@ class HomeMindCoordinator:
         return False
 
     # ------------------------------------------------------------------ #
-    # Alert e notifiche
+    # Alert sicurezza (Apple-minimal)
     # ------------------------------------------------------------------ #
 
-    async def _send_alert(
+    async def _send_security_alert(
         self,
         entity_id: str,
         camera_name: str,
         analysis: dict,
         image_bytes: bytes | None = None,
     ) -> None:
-        """Invia alert di sicurezza via Telegram."""
         if not self.bot:
             return
 
         level = analysis.get("threat_level", "none")
-        emoji = "🔴" if level == "high" else "🟠"
         everyone_away = self._everyone_away()
-        context_note = " ⚠️ *CASA VUOTA*" if everyone_away else ""
+        ts = datetime.now().strftime("%H:%M")
 
-        caption = (
-            f"🚨 *ALLERTA — {camera_name}*{context_note}\n\n"
-            f"{emoji} Rischio: *{level.upper()}*\n"
-            f"🔍 {analysis.get('description', '')}\n"
-        )
-        if analysis.get("unusual"):
-            unusual = analysis["unusual"]
-            if unusual.lower() not in ("no", "nessuno", "nessuna"):
-                caption += f"⚠️ Insolito: {unusual}\n"
-        if analysis.get("summary"):
-            caption += f"\n💬 _{analysis['summary']}_"
+        # Header minimale
+        risk_label = "ALTO" if level == "high" else "MEDIO"
+        header = f"{'🔴' if level == 'high' else '🟠'} *Allerta · {camera_name}*"
+        if everyone_away:
+            header += " · Casa vuota"
+
+        body = f"{analysis.get('description', '')}".strip()
+        if analysis.get("unusual") and analysis["unusual"].lower() not in ("no", "nessuno", "nessuna"):
+            body += f" {analysis['unusual']}".rstrip(".")
+            body += "."
+        summary = analysis.get("summary", "")
+
+        caption = f"{header}\n{ts} · Rischio {risk_label}"
+        if body:
+            caption += f"\n\n{body}"
+        if summary and summary not in body:
+            caption += f"\n\n{summary}"
         if analysis.get("security_evaluation"):
-            caption += f"\n\n🧠 *Valutazione AI:* {analysis['security_evaluation'][:200]}"
+            caption += f"\n\n_{analysis['security_evaluation'][:150]}_"
 
         if image_bytes:
-            await self.bot.send_photo(image_bytes, caption)
+            await self.bot.send_photo(image_bytes, caption[:1024])
         else:
             await self.bot.send_message(caption)
 
     # ------------------------------------------------------------------ #
-    # Report mattutino
+    # Report mattutino (Apple-minimal)
     # ------------------------------------------------------------------ #
 
     async def send_morning_report(self, force: bool = False) -> None:
-        """Genera e invia il report mattutino sicurezza + stato casa."""
         events = self.night_events
         threats = [e for e in events if e.get("threat_level") in (THREAT_MEDIUM, THREAT_HIGH)]
+        today = datetime.now().strftime("%d/%m/%Y")
 
         lines = [
-            "🌅 *Report Notturno HomeMind AI*",
-            f"_{datetime.now().strftime('%d/%m/%Y')}_\n",
-            f"📊 Analisi totali: {len(events)}",
-            f"🚨 Allerte sicurezza: {len(threats)}\n",
+            f"*Report Notturno · {today}*",
+            "",
+            f"Analisi  {len(events)}",
+            f"Allerte  {len(threats)}",
+            "",
         ]
 
         if threats:
-            lines.append("⚠️ *Eventi rilevati stanotte:*")
+            lines.append("*Eventi rilevati:*")
             for e in threats[:5]:
                 level = e.get("threat_level", "")
                 icon = "🔴" if level == "high" else "🟠"
                 cam = e.get("camera_name") or e.get("camera", "").replace("camera.", "").replace("_", " ").title()
-                lines.append(f"{icon} {e['time']} — {cam}: {e.get('summary', '')}")
+                lines.append(f"{icon} {e['time']} · {cam}: {e.get('summary', '')}")
         else:
-            lines.append("✅ Nessun evento sospetto rilevato stanotte.")
-
-        # Aggiungi contesto casa attuale
-        from .ha_context import build_home_context
-        ctx = build_home_context(self.hass, cameras=await self._get_cameras())
-        lines.append("\n" + ctx[:600])  # Max 600 chars di contesto
-        lines.append("\n_HomeMind AI con Gemini Vision_")
+            lines.append("Nessun evento sospetto rilevato stanotte.")
 
         report_text = "\n".join(lines)
-        self.last_report = report_text
+        self.last_report = report_text[:255]
         self._notify_sensors()
 
         if self.bot:

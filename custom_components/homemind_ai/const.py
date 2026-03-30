@@ -1,7 +1,7 @@
 """Costanti per HomeMind AI."""
 
 DOMAIN = "homemind_ai"
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 # ---- Configurazione ----
 CONF_GEMINI_API_KEY = "gemini_api_key"
@@ -14,13 +14,13 @@ CONF_NIGHT_START = "night_start"
 CONF_NIGHT_END = "night_end"
 CONF_MORNING_REPORT_HOUR = "morning_report_hour"
 
-# ---- Modelli Gemini ----
+# ---- Modelli Gemini (solo quelli verificati come esistenti) ----
 GEMINI_MODELS = [
     "gemini-2.0-flash",
     "gemini-1.5-flash",
     "gemini-1.5-pro",
-    "gemini-2.5-pro",
 ]
+GEMINI_FALLBACK_MODELS = ["gemini-1.5-flash", "gemini-2.0-flash"]
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 # ---- Default ----
@@ -28,13 +28,19 @@ DEFAULT_NIGHT_START = 22
 DEFAULT_NIGHT_END = 6
 DEFAULT_MORNING_REPORT_HOUR = 7
 
-# ---- Sensori ----
+# ---- Sensori stato ----
 SENSOR_AI_STATUS = "ai_status"
 SENSOR_NIGHT_MODE = "night_mode"
 SENSOR_ALERTS_TONIGHT = "alerts_tonight"
 SENSOR_LAST_ALERT = "last_alert"
 SENSOR_LAST_REPORT = "last_report"
 SENSOR_LAST_AI_ANSWER = "last_ai_answer"
+
+# ---- Sensori debug ----
+SENSOR_API_HEALTH = "api_health"
+SENSOR_LAST_ERROR = "last_error"
+SENSOR_CAMERAS_ONLINE = "cameras_online"
+SENSOR_BOT_STATUS = "bot_status"
 
 # ---- Servizi ----
 SERVICE_ANALYZE_CAMERA = "analyze_camera"

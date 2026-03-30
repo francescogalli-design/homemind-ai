@@ -1,4 +1,4 @@
-"""Sensori HomeMind AI per Home Assistant."""
+"""Sensori HomeMind AI — stato e debug per Home Assistant."""
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity
@@ -17,19 +17,25 @@ async def async_setup_entry(
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities = [
-        HomeMindSensor(coordinator, "ai_status", "HomeMind AI Status", "mdi:robot"),
-        HomeMindSensor(coordinator, "night_mode", "HomeMind Night Mode", "mdi:weather-night"),
-        HomeMindSensor(coordinator, "alerts_tonight", "HomeMind Alerts Tonight", "mdi:alert", unit="alerts"),
-        HomeMindSensor(coordinator, "last_alert", "HomeMind Last Alert", "mdi:bell-alert"),
-        HomeMindSensor(coordinator, "last_report", "HomeMind Last Report", "mdi:file-document"),
-        HomeMindSensor(coordinator, "last_ai_answer", "HomeMind Last AI Answer", "mdi:brain"),
+        # Stato operativo
+        HomeMindSensor(coordinator, "ai_status",       "HomeMind Status",         "mdi:robot",             None),
+        HomeMindSensor(coordinator, "night_mode",      "HomeMind Night Mode",     "mdi:weather-night",     None),
+        HomeMindSensor(coordinator, "alerts_tonight",  "HomeMind Alerts Tonight", "mdi:shield-alert",      "alerts"),
+        HomeMindSensor(coordinator, "last_alert",      "HomeMind Last Alert",     "mdi:bell-alert",        None),
+        HomeMindSensor(coordinator, "last_report",     "HomeMind Last Report",    "mdi:file-document",     None),
+        HomeMindSensor(coordinator, "last_ai_answer",  "HomeMind Last Answer",    "mdi:brain",             None),
+        # Debug / diagnostica
+        HomeMindSensor(coordinator, "api_health",      "HomeMind API Health",     "mdi:api",               None),
+        HomeMindSensor(coordinator, "last_error",      "HomeMind Last Error",     "mdi:alert-circle",      None),
+        HomeMindSensor(coordinator, "cameras_online",  "HomeMind Cameras Online", "mdi:cctv",              "cameras"),
+        HomeMindSensor(coordinator, "bot_status",      "HomeMind Bot Status",     "mdi:send",              None),
     ]
 
     async_add_entities(entities)
 
 
 class HomeMindSensor(SensorEntity):
-    """Sensore HomeMind AI."""
+    """Sensore HomeMind AI generico."""
 
     def __init__(
         self,
@@ -37,7 +43,7 @@ class HomeMindSensor(SensorEntity):
         sensor_type: str,
         name: str,
         icon: str,
-        unit: str | None = None,
+        unit: str | None,
     ) -> None:
         self._coordinator = coordinator
         self._sensor_type = sensor_type
@@ -45,9 +51,9 @@ class HomeMindSensor(SensorEntity):
         self._attr_icon = icon
         self._attr_native_unit_of_measurement = unit
         self._attr_unique_id = f"homemind_{sensor_type}"
-        coordinator.register_sensor_callback(self._handle_coordinator_update)
+        coordinator.register_sensor_callback(self._handle_update)
 
-    def _handle_coordinator_update(self) -> None:
+    def _handle_update(self) -> None:
         self.async_write_ha_state()
 
     @property

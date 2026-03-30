@@ -1,8 +1,9 @@
-"""Telegram Bot per HomeMind AI — polling, comandi e query AI contestuale."""
+"""Telegram Bot per HomeMind AI — polling, comandi, query AI contestuale."""
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -13,17 +14,11 @@ if TYPE_CHECKING:
     from . import HomeMindCoordinator
 
 _LOGGER = logging.getLogger(__name__)
-
 _TG_API = "https://api.telegram.org/bot{token}"
 
 
 class TelegramBot:
-    """
-    Bot Telegram con long-polling per HomeMind AI.
-
-    Riceve messaggi in arrivo, li autentica per chat_id,
-    li instrada a comandi built-in o a query AI contestuale.
-    """
+    """Bot Telegram con long-polling per HomeMind AI."""
 
     def __init__(self, coordinator: "HomeMindCoordinator") -> None:
         self._coord = coordinator
@@ -40,11 +35,10 @@ class TelegramBot:
 
     def start(self) -> None:
         if not self._token or not self._chat_id:
-            _LOGGER.info("HomeMind: Telegram bot non avviato (token o chat_id mancanti)")
             return
         self._running = True
         self._task = self._hass.loop.create_task(self._poll_loop())
-        _LOGGER.info("HomeMind: Telegram bot avviato (chat_id=%s)", self._chat_id)
+        _LOGGER.info("HomeMind: bot Telegram avviato (chat=%s)", self._chat_id)
 
     def stop(self) -> None:
         self._running = False
@@ -52,15 +46,14 @@ class TelegramBot:
             self._task.cancel()
 
     # ------------------------------------------------------------------ #
-    # Invio messaggi (usato anche dal coordinator per alert)
+    # Invio — usato anche dal coordinator
     # ------------------------------------------------------------------ #
 
     async def send_message(self, text: str, chat_id: str | None = None) -> None:
         cid = chat_id or self._chat_id
-        if not cid or not self._token:
+        if not cid:
             return
-        # Telegram max 4096 chars per message
-        for chunk in _split_message(text, 4000):
+        for chunk in _chunks(text, 4000):
             session = async_get_clientsession(self._hass)
             try:
                 await session.post(
@@ -69,37 +62,35 @@ class TelegramBot:
                     timeout=aiohttp.ClientTimeout(total=15),
                 )
             except Exception as exc:
-                _LOGGER.error("Telegram sendMessage errore: %s", exc)
+                _LOGGER.error("Telegram sendMessage: %s", exc)
 
     async def send_photo(
         self, image_bytes: bytes, caption: str, chat_id: str | None = None
     ) -> None:
         cid = chat_id or self._chat_id
-        if not cid or not self._token:
+        if not cid:
             return
         session = async_get_clientsession(self._hass)
         try:
-            data = aiohttp.FormData()
-            data.add_field("chat_id", cid)
-            data.add_field("caption", caption[:1024])
-            data.add_field("parse_mode", "Markdown")
-            data.add_field(
-                "photo", image_bytes, filename="snapshot.jpg", content_type="image/jpeg"
-            )
+            form = aiohttp.FormData()
+            form.add_field("chat_id", cid)
+            form.add_field("caption", caption[:1024])
+            form.add_field("parse_mode", "Markdown")
+            form.add_field("photo", image_bytes, filename="snapshot.jpg", content_type="image/jpeg")
             await session.post(
                 f"{self._base}/sendPhoto",
-                data=data,
+                data=form,
                 timeout=aiohttp.ClientTimeout(total=30),
             )
         except Exception as exc:
-            _LOGGER.error("Telegram sendPhoto errore: %s", exc)
+            _LOGGER.error("Telegram sendPhoto: %s", exc)
 
     # ------------------------------------------------------------------ #
-    # Polling loop
+    # Polling
     # ------------------------------------------------------------------ #
 
     async def _drain_old_updates(self) -> int:
-        """Scarica i messaggi in coda al riavvio per evitare di rielaborarli."""
+        """Salta messaggi accodati prima dell'avvio."""
         session = async_get_clientsession(self._hass)
         try:
             async with session.get(
@@ -108,12 +99,11 @@ class TelegramBot:
                 timeout=aiohttp.ClientTimeout(total=8),
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    updates = data.get("result", [])
+                    updates = (await resp.json()).get("result", [])
                     if updates:
                         return updates[-1]["update_id"] + 1
-        except Exception as exc:
-            _LOGGER.debug("drain_old_updates: %s", exc)
+        except Exception:
+            pass
         return 0
 
     async def _get_updates(self, offset: int) -> list[dict]:
@@ -121,240 +111,466 @@ class TelegramBot:
         try:
             async with session.get(
                 f"{self._base}/getUpdates",
-                params={
-                    "offset": offset,
-                    "timeout": 30,
-                    "allowed_updates": '["message"]',
-                },
+                params={"offset": offset, "timeout": 30, "allowed_updates": '["message"]'},
                 timeout=aiohttp.ClientTimeout(total=40),
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("result", [])
+                    return (await resp.json()).get("result", [])
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            _LOGGER.debug("getUpdates errore: %s", exc)
+            _LOGGER.debug("getUpdates: %s", exc)
         return []
 
     async def _poll_loop(self) -> None:
         offset = await self._drain_old_updates()
-        _LOGGER.debug("HomeMind bot: polling da offset %d", offset)
-
         while self._running:
             try:
-                updates = await self._get_updates(offset)
-                for upd in updates:
+                for upd in await self._get_updates(offset):
                     offset = upd["update_id"] + 1
                     await self._handle_update(upd)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                _LOGGER.error("Telegram poll loop errore: %s", exc)
+                _LOGGER.error("Poll loop: %s", exc)
                 await asyncio.sleep(5)
 
-    # ------------------------------------------------------------------ #
-    # Routing messaggi
-    # ------------------------------------------------------------------ #
-
     async def _handle_update(self, update: dict) -> None:
-        message = update.get("message")
-        if not message:
+        msg = update.get("message")
+        if not msg:
             return
-
-        chat_id = str(message.get("chat", {}).get("id", ""))
-
-        # Auth: solo chat_id autorizzato
+        chat_id = str(msg.get("chat", {}).get("id", ""))
         if self._chat_id and chat_id != self._chat_id:
-            _LOGGER.warning("HomeMind: messaggio ignorato da chat non autorizzata %s", chat_id)
+            _LOGGER.warning("HomeMind: messaggio ignorato da chat %s", chat_id)
             return
-
-        text = (message.get("text") or "").strip()
+        text = (msg.get("text") or "").strip()
         if not text:
-            # Voce o media: non gestita in questa versione
             return
-
-        _LOGGER.info("HomeMind Telegram [%s]: %s", chat_id, text[:60])
+        _LOGGER.info("HomeMind bot: [%s] %s", chat_id, text[:60])
         await self._route(text, chat_id)
 
+    # ------------------------------------------------------------------ #
+    # Routing
+    # ------------------------------------------------------------------ #
+
     async def _route(self, text: str, chat_id: str) -> None:
-        lower = text.lower().strip()
+        t = text.lower().strip()
 
-        # ---- Comandi built-in ----
-        if lower in ("/start", "/help", "/comandi", "aiuto", "help"):
-            await self.send_message(self._help_text(), chat_id)
+        # Generali
+        if t in ("/start", "/help", "/comandi"):
+            await self.send_message(_help_text(), chat_id)
             return
 
-        if lower in ("/stato", "stato casa", "com'è la casa", "come sta la casa", "stato"):
-            await self._cmd_status(chat_id)
+        if t in ("/stato", "stato", "stato casa"):
+            await self._cmd_stato(chat_id)
             return
 
-        if lower in ("/camere", "lista camere", "quali telecamere", "telecamere"):
-            await self._cmd_list_cameras(chat_id)
+        if t in ("/debug", "debug"):
+            await self._cmd_debug(chat_id)
             return
 
-        if lower in ("/sensori", "sensori movimento", "sensori"):
-            await self._cmd_motion_sensors(chat_id)
+        if t in ("/persone", "persone", "chi è in casa", "chi c'è in casa"):
+            await self._cmd_persone(chat_id)
             return
 
-        if lower in ("/report", "genera report", "report sicurezza", "report notturno"):
+        if t in ("/luci", "luci", "luci accese", "stato luci"):
+            await self._cmd_luci(chat_id)
+            return
+
+        if t in ("/tapparelle", "tapparelle", "stato tapparelle", "cover"):
+            await self._cmd_tapparelle(chat_id)
+            return
+
+        if t in ("/temperatura", "temperatura", "temperature", "termostati"):
+            await self._cmd_temperatura(chat_id)
+            return
+
+        if t in ("/allarme", "allarme", "stato allarme"):
+            await self._cmd_allarme(chat_id)
+            return
+
+        if t in ("/camere", "camere", "telecamere"):
+            await self._cmd_lista_camere(chat_id)
+            return
+
+        if t in ("/sensori", "sensori", "sensori movimento"):
+            await self._cmd_sensori(chat_id)
+            return
+
+        if t in ("/report", "report", "report sicurezza", "report notturno"):
             await self._coord.send_morning_report(force=True)
-            await self.send_message("📊 Report di sicurezza generato.", chat_id)
             return
 
-        if lower in ("/svuota", "svuota alert", "cancella alert"):
+        if t in ("/svuota", "svuota", "svuota alert"):
             self._coord.night_events.clear()
             self._coord.alerts_tonight = 0
-            await self.send_message("🗑️ Alert notturni azzerati.", chat_id)
+            self._coord._notify_sensors()
+            await self.send_message("Alert notturni azzerati.", chat_id)
             return
 
-        # ---- Analisi telecamera specifica ----
-        cameras = await self._coord._get_cameras()
+        # Analisi camera specifica per nome/entity
+        cameras = await self._coord._get_all_cameras_raw()
         for cam_id in cameras:
-            cam_slug = cam_id.replace("camera.", "").replace("_", " ").lower()
             state = self._hass.states.get(cam_id)
-            cam_friendly = ""
-            if state:
-                cam_friendly = state.attributes.get("friendly_name", "").lower()
-            if (
-                cam_slug in lower
-                or cam_id.lower() in lower
-                or (cam_friendly and cam_friendly in lower)
-            ):
-                await self._cmd_analyze_camera(cam_id, chat_id)
+            cam_friendly = (state.attributes.get("friendly_name", "") if state else "").lower()
+            cam_slug = cam_id.replace("camera.", "").replace("_", " ").lower()
+            if cam_slug in t or cam_id in t or (cam_friendly and cam_friendly in t):
+                await self._cmd_analizza_camera(cam_id, chat_id)
                 return
 
-        # ---- Analisi tutte le camere ----
-        if (
-            lower.startswith("/analizza")
-            or ("analizza" in lower and "tutte" in lower)
-            or lower in ("analizza camere", "analizza telecamere", "/camere_ai")
-        ):
-            await self._cmd_analyze_all(chat_id)
+        # Analisi tutte le camere
+        if "/analizza" in t or ("analizza" in t and any(k in t for k in ("camera", "telecamera", "tutte", "camere"))):
+            await self._cmd_analizza_tutte(chat_id)
             return
 
-        # ---- Query AI contestuale (default) ----
+        # Query AI contestuale (default per tutto il resto)
         await self._cmd_ai_query(text, chat_id)
 
     # ------------------------------------------------------------------ #
-    # Handlers comandi
+    # Comandi — stato casa
     # ------------------------------------------------------------------ #
 
-    async def _cmd_status(self, chat_id: str) -> None:
-        from .ha_context import build_home_context
+    async def _cmd_stato(self, chat_id: str) -> None:
+        """Stato sintetico della casa."""
+        hass = self._hass
+        now = datetime.now().strftime("%H:%M")
 
-        context = build_home_context(
-            self._hass, cameras=await self._coord._get_cameras()
-        )
-        await self.send_message(context, chat_id)
+        lines = [f"*Casa · {now}*", ""]
 
-    async def _cmd_list_cameras(self, chat_id: str) -> None:
-        cameras = await self._coord._get_cameras()
-        if not cameras:
-            await self.send_message(
-                "❌ Nessuna telecamera configurata.\n"
-                "Vai in *Impostazioni → Integrazioni → HomeMind AI → Configura* "
-                "per selezionare le telecamere.",
-                chat_id,
-            )
-            return
+        # Persone
+        persons = hass.states.async_entity_ids("person")
+        if persons:
+            home = [_fname(hass, e) for e in persons if _state(hass, e) in ("home", "Home", "casa")]
+            away = [_fname(hass, e) for e in persons if _state(hass, e) not in ("home", "Home", "casa")]
+            if home:
+                lines.append(f"In casa   {', '.join(home)}")
+            if away:
+                lines.append(f"Fuori     {', '.join(away)}")
 
-        lines = ["📷 *Telecamere monitorate:*\n"]
-        for cam_id in cameras:
-            state = self._hass.states.get(cam_id)
-            name = (
-                state.attributes.get("friendly_name") or cam_id
-                if state
-                else cam_id
-            )
-            lines.append(f"• {name}")
-        lines.append(f"\n💬 _Scrivi il nome di una telecamera per analizzarla._")
+        # Allarme
+        alarms = hass.states.async_entity_ids("alarm_control_panel")
+        if alarms:
+            for eid in alarms:
+                lines.append(f"Allarme   {_state(hass, eid)}")
+
+        # Luci
+        all_lights = hass.states.async_entity_ids("light")
+        on_lights = [_fname(hass, e) for e in all_lights if _state(hass, e) == "on"]
+        if on_lights:
+            lines.append(f"Luci      {len(on_lights)} accese: {', '.join(on_lights[:4])}" +
+                         (f" +{len(on_lights)-4}" if len(on_lights) > 4 else ""))
+        else:
+            lines.append("Luci      tutte spente")
+
+        # Temperature
+        temps = [
+            f"{_fname(hass, e)} {_state(hass, e)}°"
+            for e in hass.states.async_entity_ids("sensor")
+            if _attr(hass, e, "device_class") == "temperature"
+            and not any(s in _fname(hass, e).lower() for s in ("cpu", "gpu", "system"))
+            and _state(hass, e) not in ("unavailable", "unknown")
+        ]
+        if temps:
+            lines.append(f"Temp      {', '.join(temps[:3])}")
+
+        # Tapparelle
+        covers = hass.states.async_entity_ids("cover")
+        if covers:
+            open_c = [_fname(hass, e) for e in covers if _state(hass, e) == "open"]
+            if open_c:
+                lines.append(f"Tappar.   {', '.join(open_c[:3])} aperte")
+            else:
+                lines.append(f"Tappar.   tutte chiuse")
+
+        # Telecamere
+        cams = await self._coord._get_cameras()
+        if cams:
+            lines.append(f"Camere    {len(cams)} monitorate")
+
         await self.send_message("\n".join(lines), chat_id)
 
-    async def _cmd_motion_sensors(self, chat_id: str) -> None:
-        sensors: list[str] = []
-        for eid in self._hass.states.async_entity_ids("binary_sensor"):
-            state = self._hass.states.get(eid)
+    async def _cmd_persone(self, chat_id: str) -> None:
+        hass = self._hass
+        persons = hass.states.async_entity_ids("person")
+        if not persons:
+            await self.send_message("Nessuna entità person configurata in HA.", chat_id)
+            return
+        lines = ["*Persone*", ""]
+        for eid in persons:
+            state = hass.states.get(eid)
             if not state:
                 continue
-            dc = state.attributes.get("device_class", "")
-            if dc not in ("motion", "occupancy"):
-                continue
             name = state.attributes.get("friendly_name") or eid
-            icon = "🔴" if state.state == "on" else "🟢"
-            label = "ATTIVO" if state.state == "on" else "inattivo"
-            sensors.append(f"{icon} {name}: {label}")
-        if not sensors:
+            at_home = state.state in ("home", "Home", "casa")
+            lines.append(f"{'In casa' if at_home else 'Fuori'}   {name}")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_luci(self, chat_id: str) -> None:
+        hass = self._hass
+        lights = hass.states.async_entity_ids("light")
+        if not lights:
+            await self.send_message("Nessuna luce configurata in HA.", chat_id)
+            return
+        on_lines, off_lines = [], []
+        for eid in lights:
+            s = hass.states.get(eid)
+            if not s:
+                continue
+            name = s.attributes.get("friendly_name") or eid
+            if s.state == "on":
+                bri = s.attributes.get("brightness")
+                pct = f" {int(bri/255*100)}%" if bri else ""
+                on_lines.append(f"  {name}{pct}")
+            else:
+                off_lines.append(f"  {name}")
+        lines = [f"*Luci · {len(on_lines)} accese / {len(off_lines)} spente*"]
+        if on_lines:
+            lines += ["", "Accese:"] + on_lines[:10]
+        if off_lines:
+            lines += ["", "Spente:"] + off_lines[:8]
+            if len(off_lines) > 8:
+                lines.append(f"  ... e altre {len(off_lines)-8}")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_tapparelle(self, chat_id: str) -> None:
+        hass = self._hass
+        covers = hass.states.async_entity_ids("cover")
+        if not covers:
+            await self.send_message("Nessuna tapparella/cover configurata in HA.", chat_id)
+            return
+        lines = ["*Tapparelle*", ""]
+        for eid in covers:
+            s = hass.states.get(eid)
+            if not s:
+                continue
+            name = s.attributes.get("friendly_name") or eid
+            pos = s.attributes.get("current_position")
+            pos_str = f"{pos}%" if pos is not None else s.state
+            lines.append(f"  {name}: {pos_str}")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_temperatura(self, chat_id: str) -> None:
+        hass = self._hass
+        temps, climates = [], []
+        for eid in hass.states.async_entity_ids("sensor"):
+            s = hass.states.get(eid)
+            if not s or s.attributes.get("device_class") != "temperature":
+                continue
+            name = s.attributes.get("friendly_name") or eid
+            if any(x in name.lower() for x in ("cpu", "gpu", "system", "board")):
+                continue
+            if s.state in ("unavailable", "unknown"):
+                continue
+            unit = s.attributes.get("unit_of_measurement", "°C")
+            temps.append(f"  {name}: {s.state}{unit}")
+        for eid in hass.states.async_entity_ids("climate"):
+            s = hass.states.get(eid)
+            if not s:
+                continue
+            name = s.attributes.get("friendly_name") or eid
+            cur = s.attributes.get("current_temperature")
+            setpt = s.attributes.get("temperature")
+            detail = ""
+            if cur is not None:
+                detail = f" {cur}°C"
+                if setpt is not None:
+                    detail += f" → {setpt}°C"
+            climates.append(f"  {name}: {s.state}{detail}")
+        lines = ["*Temperature*"]
+        if temps:
+            lines += ["", "Sensori:"] + temps[:8]
+        if climates:
+            lines += ["", "Termostati:"] + climates[:5]
+        if not temps and not climates:
+            lines.append("\nNessun sensore temperatura rilevato.")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_allarme(self, chat_id: str) -> None:
+        hass = self._hass
+        alarms = hass.states.async_entity_ids("alarm_control_panel")
+        if not alarms:
+            await self.send_message("Nessun pannello allarme configurato in HA.", chat_id)
+            return
+        lines = ["*Allarme*", ""]
+        for eid in alarms:
+            s = hass.states.get(eid)
+            if not s:
+                continue
+            name = s.attributes.get("friendly_name") or eid
+            lines.append(f"  {name}: {s.state}")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_lista_camere(self, chat_id: str) -> None:
+        all_cams = await self._coord._get_all_cameras_raw()
+        active_cams = await self._coord._get_cameras()
+        unsupported = self._coord._unsupported_cameras
+
+        if not all_cams:
             await self.send_message(
-                "ℹ️ Nessun sensore di movimento (binary_sensor con device_class motion/occupancy) trovato.",
+                "Nessuna telecamera trovata in HA.\n\n"
+                "Vai in Impostazioni → Integrazioni → HomeMind AI → Configura.",
                 chat_id,
             )
             return
-        text = "📡 *Sensori movimento:*\n\n" + "\n".join(sensors)
-        await self.send_message(text, chat_id)
 
-    async def _cmd_analyze_all(self, chat_id: str) -> None:
+        lines = [f"*Telecamere · {len(active_cams)} attive*", ""]
+        for cam_id in all_cams:
+            s = self._hass.states.get(cam_id)
+            name = (s.attributes.get("friendly_name") or cam_id) if s else cam_id
+            if cam_id in unsupported:
+                lines.append(f"  {name} — non supportata (camera virtuale)")
+            else:
+                lines.append(f"  {name}")
+        lines.append("\nScrivi il nome per analizzarla, oppure /analizza per tutte.")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_sensori(self, chat_id: str) -> None:
+        hass = self._hass
+        sensors = []
+        for eid in hass.states.async_entity_ids("binary_sensor"):
+            s = hass.states.get(eid)
+            if not s:
+                continue
+            dc = s.attributes.get("device_class", "")
+            if dc not in ("motion", "occupancy"):
+                continue
+            name = s.attributes.get("friendly_name") or eid
+            active = s.state == "on"
+            sensors.append((active, name))
+        if not sensors:
+            await self.send_message("Nessun sensore di movimento (motion/occupancy) trovato.", chat_id)
+            return
+        sensors.sort(key=lambda x: not x[0])  # Attivi prima
+        lines = ["*Sensori movimento*", ""]
+        for active, name in sensors:
+            lines.append(f"  {'ATTIVO' if active else 'inattivo'}   {name}")
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_debug(self, chat_id: str) -> None:
+        coord = self._coord
+        cams_all = await coord._get_all_cameras_raw()
+        cams_ok = await coord._get_cameras()
+        motion_sensors = await coord._get_motion_sensors()
+
+        lines = [
+            "*HomeMind AI — Debug*",
+            "",
+            f"Versione    2.1.0",
+            f"Stato API   {coord.api_health}",
+            f"Modello     {coord.gemini_model}",
+            f"Bot         {coord.bot_status}",
+            f"Notte       {'attiva' if coord.night_mode == 'active' else 'inattiva'}  ({coord.night_start}:00–{coord.night_end}:00)",
+            "",
+            f"Camere tot  {len(cams_all)}",
+            f"Camere ok   {len(cams_ok)}",
+            f"Non supp.   {len(coord._unsupported_cameras)}",
+            f"Sens. mov.  {len(motion_sensors)}",
+            f"Alert nott. {coord.alerts_tonight}",
+            "",
+        ]
+        if coord._unsupported_cameras:
+            lines.append("*Camere escluse (virtuali):*")
+            for cam_id in coord._unsupported_cameras:
+                s = self._hass.states.get(cam_id)
+                name = s.attributes.get("friendly_name", cam_id) if s else cam_id
+                lines.append(f"  {name}")
+            lines.append("")
+        if coord.last_error:
+            lines.append(f"*Ultimo errore:*\n{coord.last_error}")
+
+        await self.send_message("\n".join(lines), chat_id)
+
+    # ------------------------------------------------------------------ #
+    # Analisi camere con foto
+    # ------------------------------------------------------------------ #
+
+    async def _cmd_analizza_tutte(self, chat_id: str) -> None:
         cameras = await self._coord._get_cameras()
         if not cameras:
             await self.send_message(
-                "❌ Nessuna telecamera configurata. Impostala prima dalla UI.",
+                "Nessuna telecamera supportata configurata.\n"
+                "Usa /debug per vedere lo stato delle camere.",
                 chat_id,
             )
             return
-        await self.send_message(
-            f"🔍 Analizzo {len(cameras)} telecamera/e con Gemini Vision...", chat_id
-        )
+        await self.send_message(f"Analizzo {len(cameras)} telecamera/e...", chat_id)
         for cam_id in cameras:
-            await self._cmd_analyze_camera(cam_id, chat_id)
+            await self._cmd_analizza_camera(cam_id, chat_id)
 
-    async def _cmd_analyze_camera(self, cam_id: str, chat_id: str) -> None:
-        state = self._hass.states.get(cam_id)
+    async def _cmd_analizza_camera(self, cam_id: str, chat_id: str) -> None:
+        """Analizza camera e invia FOTO + analisi al bot."""
+        hass = self._hass
+        coord = self._coord
+        state = hass.states.get(cam_id)
         cam_name = (
             state.attributes.get("friendly_name")
             or cam_id.replace("camera.", "").replace("_", " ").title()
-            if state
-            else cam_id
-        )
-        await self.send_message(f"🔍 Analizzo *{cam_name}*...", chat_id)
+        ) if state else cam_id
 
-        result = await self._coord.analyze_single_camera(cam_id)
+        # Prova snapshot prima (verifica che sia supportata)
+        image_bytes = await coord._get_camera_snapshot(cam_id)
+        if not image_bytes:
+            if cam_id in coord._unsupported_cameras:
+                await self.send_message(
+                    f"*{cam_name}*\n\n"
+                    "Camera non supportata — probabilmente una camera virtuale o slideshow. "
+                    "Solo telecamere IP reali sono compatibili con l'analisi AI.",
+                    chat_id,
+                )
+            else:
+                await self.send_message(
+                    f"*{cam_name}*\n\nSnapshot non disponibile. Verifica che la camera sia online.",
+                    chat_id,
+                )
+            return
+
+        # Analisi Gemini Vision (riusa lo snapshot già in cache)
+        result = await coord.analyze_single_camera(cam_id)
         if not result:
-            await self.send_message(
-                f"❌ Impossibile ottenere snapshot da *{cam_name}*.\n"
-                "Verifica che la telecamera sia online.",
-                chat_id,
-            )
+            await self.send_message(f"*{cam_name}*\n\nAnalisi non disponibile.", chat_id)
             return
 
         level = result.get("threat_level", "none")
-        emoji = {"high": "🔴", "medium": "🟠", "low": "🟡", "none": "🟢"}.get(level, "⚪")
+        ts = datetime.now().strftime("%H:%M")
 
-        lines = [
-            f"📷 *{cam_name}*",
+        # Caption Apple-minimal (max 1024 chars per foto)
+        caption_lines = [
+            f"*{cam_name}*",
             "",
-            f"{emoji} Rischio: *{level.upper()}*",
-            f"🔍 {result.get('description', 'N/A')}",
+            result.get("description", ""),
         ]
         unusual = result.get("unusual", "")
-        if unusual and unusual.lower() not in ("no", "nessuno", "nessuna", "niente"):
-            lines.append(f"⚠️ Insolito: {unusual}")
-        summary = result.get("summary", "")
-        if summary:
-            lines.append(f"\n💬 _{summary}_")
+        if unusual and unusual.lower() not in ("no", "nessuno", "nessuna", "niente", ""):
+            caption_lines.append(unusual)
+        caption_lines += [
+            "",
+            f"Rischio: {level.upper()} · {ts}",
+        ]
+        if result.get("summary"):
+            caption_lines.append(f"_{result['summary']}_")
+        if result.get("error"):
+            caption_lines.append(f"\nErrore: {result['error']}")
 
-        await self.send_message("\n".join(lines), chat_id)
+        caption = "\n".join(caption_lines)
+
+        # Invia FOTO + caption
+        photo = coord._last_snapshots.get(cam_id, image_bytes)
+        await self.send_photo(photo, caption[:1024], chat_id)
+
+    # ------------------------------------------------------------------ #
+    # Query AI contestuale
+    # ------------------------------------------------------------------ #
 
     async def _cmd_ai_query(self, question: str, chat_id: str) -> None:
         from .ha_context import build_home_context
         from .ai_provider import ask_gemini
 
-        await self.send_message("🤔 Sto elaborando...", chat_id)
+        await self.send_message("...", chat_id)
 
         context = build_home_context(
             self._hass, cameras=await self._coord._get_cameras()
         )
         session = async_get_clientsession(self._hass)
-
         answer = await ask_gemini(
             session=session,
             api_key=self._coord.api_key,
@@ -364,45 +580,63 @@ class TelegramBot:
         )
         await self.send_message(answer, chat_id)
 
-    # ------------------------------------------------------------------ #
-    # Help
-    # ------------------------------------------------------------------ #
 
-    def _help_text(self) -> str:
-        return (
-            "🏠 *HomeMind AI — Comandi*\n\n"
-            "📊 `/stato` — Stato completo della casa\n"
-            "📷 `/camere` — Elenco telecamere monitorate\n"
-            "🔍 `/analizza` — Analisi AI di tutte le telecamere\n"
-            "📡 `/sensori` — Stato sensori di movimento\n"
-            "📋 `/report` — Report sicurezza notturno\n"
-            "🗑️ `/svuota` — Azzera alert notturni\n"
-            "❓ `/help` — Questo messaggio\n\n"
-            "💬 *Oppure scrivi qualsiasi domanda!*\n"
-            "_Esempi:_\n"
-            "• Chi c'è in casa adesso?\n"
-            "• Le finestre sono chiuse?\n"
-            "• Cosa vedi dalla camera ingresso?\n"
-            "• Luci accese?\n"
-            "• Stato allarme?"
-        )
+# ------------------------------------------------------------------ #
+# Testo help (Apple-minimal)
+# ------------------------------------------------------------------ #
+
+def _help_text() -> str:
+    return (
+        "*HomeMind AI*\n\n"
+        "*Stato*\n"
+        "/stato — Riepilogo casa\n"
+        "/persone — Chi è in casa\n"
+        "/luci — Stato luci\n"
+        "/tapparelle — Posizione coperture\n"
+        "/temperatura — Sensori e termostati\n"
+        "/allarme — Pannello allarme\n\n"
+        "*Sicurezza*\n"
+        "/camere — Lista telecamere\n"
+        "/analizza — Analisi AI di tutte le camere\n"
+        "/sensori — Sensori di movimento\n"
+        "/report — Report notturno\n"
+        "/svuota — Azzera alert\n\n"
+        "*Diagnostica*\n"
+        "/debug — Stato API, modello, errori\n\n"
+        "Oppure scrivi qualsiasi domanda sulla tua casa."
+    )
 
 
 # ------------------------------------------------------------------ #
-# Utility
+# Utility helpers
 # ------------------------------------------------------------------ #
 
-def _split_message(text: str, max_len: int = 4000) -> list[str]:
-    """Suddivide testo lungo in chunk per Telegram."""
-    if len(text) <= max_len:
+def _chunks(text: str, size: int = 4000) -> list[str]:
+    if len(text) <= size:
         return [text]
-    chunks: list[str] = []
+    parts = []
     while text:
-        chunk = text[:max_len]
-        # Taglia a newline se possibile
+        chunk = text[:size]
         cut = chunk.rfind("\n")
-        if cut > max_len // 2:
+        if cut > size // 2:
             chunk = text[:cut]
-        chunks.append(chunk)
+        parts.append(chunk)
         text = text[len(chunk):]
-    return chunks
+    return parts
+
+
+def _state(hass, eid: str) -> str:
+    s = hass.states.get(eid)
+    return s.state if s else "unavailable"
+
+
+def _fname(hass, eid: str) -> str:
+    s = hass.states.get(eid)
+    if not s:
+        return eid
+    return s.attributes.get("friendly_name") or eid
+
+
+def _attr(hass, eid: str, key: str):
+    s = hass.states.get(eid)
+    return s.attributes.get(key) if s else None

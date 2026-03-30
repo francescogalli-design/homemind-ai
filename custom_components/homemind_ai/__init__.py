@@ -346,8 +346,11 @@ class HomeMindCoordinator:
         self.last_error = f"Modello '{self.gemini_model}': {msg}"
 
         fallbacks = [m for m in GEMINI_FALLBACK_ORDER if m != self.gemini_model]
+        fallback_errors: list[str] = [f"{self.gemini_model}: {msg}"]
+
         for fallback in fallbacks:
             ok2, msg2 = await self._test_gemini_model(fallback)
+            fallback_errors.append(f"{fallback}: {msg2}")
             if ok2:
                 # USA il fallback solo a runtime, NON modifica gemini_model
                 self._active_model = fallback
@@ -355,8 +358,7 @@ class HomeMindCoordinator:
                 self.ai_status = "online"
                 self.last_error = (
                     f"Il modello '{self.gemini_model}' non è disponibile. "
-                    f"Uso temporaneamente '{fallback}'. "
-                    f"Motivo: {msg}"
+                    f"Uso temporaneamente '{fallback}'. Motivo: {msg}"
                 )
                 _LOGGER.warning(
                     "HomeMind: fallback temporaneo a '%s' (modello scelto '%s' non disponibile: %s)",
@@ -375,12 +377,16 @@ class HomeMindCoordinator:
                     )
                 return
 
-        # Tutti i modelli falliti
-        self._active_model = self.gemini_model  # rimane il selezionato, ma ai_status = error
-        self.api_health = f"Errore — tutti i modelli non disponibili"
+        # Tutti i modelli falliti — mostra errore dettagliato per ogni modello
+        self._active_model = self.gemini_model
+        self.api_health = "Errore — nessun modello disponibile"
         self.ai_status = "error"
-        self.last_error = f"Modello '{self.gemini_model}' e fallback non disponibili. {msg}"
-        _LOGGER.error("HomeMind: nessun modello Gemini disponibile. Ultimo errore: %s", msg)
+        detail = " | ".join(fallback_errors[:3])  # max 3 per leggibilità
+        self.last_error = f"Nessun modello disponibile. Dettaglio: {detail}"
+        _LOGGER.error(
+            "HomeMind: nessun modello Gemini disponibile. Errori: %s",
+            " | ".join(fallback_errors),
+        )
 
     # ------------------------------------------------------------------ #
     # Callbacks sensori

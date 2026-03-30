@@ -107,24 +107,26 @@ class HomeMindConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
-        return HomeMindOptionsFlow(config_entry)
+        # In HA 2024.x+ config_entry viene passato automaticamente alla flow
+        return HomeMindOptionsFlow()
 
 
 class HomeMindOptionsFlow(config_entries.OptionsFlow):
     """Opzioni modificabili dopo l'installazione (accesso dal tasto Configura)."""
 
-    def __init__(self, config_entry) -> None:
-        self.config_entry = config_entry
+    # NON definire __init__ con config_entry: in HA 2024.x+ è impostato
+    # automaticamente dalla base class tramite self.config_entry.
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        # Merge data + options attuali
+        # Merge data + options attuali (self.config_entry impostato da HA)
         cur = {**self.config_entry.data, **self.config_entry.options}
 
         schema = vol.Schema(
             {
+                vol.Optional(CONF_GEMINI_API_KEY, default=cur.get(CONF_GEMINI_API_KEY, "")): str,
                 vol.Optional(CONF_GEMINI_MODEL, default=cur.get(CONF_GEMINI_MODEL, DEFAULT_GEMINI_MODEL)): vol.In(GEMINI_MODELS),
                 vol.Optional(CONF_TELEGRAM_TOKEN, default=cur.get(CONF_TELEGRAM_TOKEN, "")): str,
                 vol.Optional(CONF_TELEGRAM_CHAT_ID, default=cur.get(CONF_TELEGRAM_CHAT_ID, "")): str,

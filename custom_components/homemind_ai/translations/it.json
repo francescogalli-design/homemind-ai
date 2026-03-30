@@ -35,6 +35,7 @@
       "init": {
         "title": "HomeMind AI — Opzioni",
         "data": {
+          "gemini_api_key": "Gemini API Key",
           "gemini_model": "Modello Gemini",
           "telegram_token": "Telegram Bot Token",
           "telegram_chat_id": "Telegram Chat ID",

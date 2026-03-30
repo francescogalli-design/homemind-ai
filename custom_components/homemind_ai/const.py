@@ -1,7 +1,7 @@
 """Costanti per HomeMind AI."""
 
 DOMAIN = "homemind_ai"
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 
 # ---- Configurazione ----
 CONF_GEMINI_API_KEY = "gemini_api_key"
@@ -14,14 +14,21 @@ CONF_NIGHT_START = "night_start"
 CONF_NIGHT_END = "night_end"
 CONF_MORNING_REPORT_HOUR = "morning_report_hour"
 
-# ---- Modelli Gemini (solo quelli verificati come esistenti) ----
+# ---- Modelli Gemini ----
 GEMINI_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
+    "gemini-2.0-flash",        # Raccomandato — stabile, gratuito
+    "gemini-2.0-flash-lite",   # Più leggero, gratuito
+    "gemini-1.5-flash",        # Generazione precedente
+    "gemini-1.5-flash-8b",     # Versione lite 1.5
+    "gemini-1.5-pro",          # Generazione precedente — pro
 ]
-# Fallback solo su modelli gratuiti, nell'ordine in cui provarli
-GEMINI_FALLBACK_ORDER = ["gemini-2.0-flash", "gemini-1.5-flash"]
+# Fallback su modelli gratuiti in ordine di preferenza
+GEMINI_FALLBACK_ORDER = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+]
 DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 # Entità ping HA per check connessione internet

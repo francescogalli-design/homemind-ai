@@ -1,7 +1,7 @@
 """Costanti per HomeMind AI."""
 
 DOMAIN = "homemind_ai"
-VERSION = "2.2.0"
+VERSION = "3.0.0"
 
 # ---- Dominio integrazione HA Gemini ----
 HA_GEMINI_DOMAIN = "google_generative_ai_conversation"
@@ -48,6 +48,10 @@ DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "llava"
 
+# ---- ALPR (riconoscimento targhe) ----
+CONF_ALPR_ENTITIES = "alpr_entities"
+CONF_VEHICLE_SENSORS = "vehicle_sensors"
+
 # Entità ping HA per check connessione internet
 PING_ENTITY = "binary_sensor.8_8_8_8"
 
@@ -70,6 +74,10 @@ SENSOR_LAST_ERROR = "last_error"
 SENSOR_CAMERAS_ONLINE = "cameras_online"
 SENSOR_BOT_STATUS = "bot_status"
 SENSOR_INTERNET_STATUS = "internet_status"
+
+# ---- Sensori ALPR ----
+SENSOR_LAST_PLATE = "last_plate"
+SENSOR_PLATES_TODAY = "plates_today"
 
 # ---- Servizi ----
 SERVICE_ANALYZE_CAMERA = "analyze_camera"

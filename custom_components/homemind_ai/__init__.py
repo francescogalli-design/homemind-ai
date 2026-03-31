@@ -17,6 +17,7 @@ from .const import (
     AI_PROVIDER_HA_GEMINI,
     AI_PROVIDER_OLLAMA,
     CONF_AI_PROVIDER,
+    CONF_ALPR_ENTITIES,
     CONF_CAMERAS,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_MODEL,
@@ -28,6 +29,7 @@ from .const import (
     CONF_OLLAMA_MODEL,
     CONF_TELEGRAM_CHAT_ID,
     CONF_TELEGRAM_TOKEN,
+    CONF_VEHICLE_SENSORS,
     DEFAULT_AI_PROVIDER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_MORNING_REPORT_HOUR,
@@ -167,6 +169,10 @@ class HomeMindCoordinator:
         self.night_end: int = cfg.get(CONF_NIGHT_END, DEFAULT_NIGHT_END)
         self.morning_report_hour: int = cfg.get(CONF_MORNING_REPORT_HOUR, DEFAULT_MORNING_REPORT_HOUR)
 
+        # ALPR config
+        self.alpr_entities: list[str] = cfg.get(CONF_ALPR_ENTITIES, [])
+        self.vehicle_sensors: list[str] = cfg.get(CONF_VEHICLE_SENSORS, [])
+
         # Stato sensori
         self.ai_status: str = "starting"
         self.night_mode: str = "inactive"
@@ -202,6 +208,17 @@ class HomeMindCoordinator:
         # Set camere non supportate (es. slideshow virtuali)
         self._unsupported_cameras: set[str] = set()
 
+        # Digest: raccogli eventi, invio periodico consolidato
+        self._pending_events: list[dict] = []
+        self._last_digest_ts: float = 0
+        self._digest_interval_night: int = 900   # 15 min
+        self._digest_interval_day: int = 1800    # 30 min
+
+        # ALPR state
+        self.last_plate: str = ""
+        self.plates_today: int = 0
+        self._plate_manager = None  # type: PlateRecognitionManager | None
+
         self._sensor_callbacks: list = []
         self.bot: TelegramBot | None = None
         self._monitor_task: asyncio.Task | None = None
@@ -227,6 +244,8 @@ class HomeMindCoordinator:
         )
 
     def stop(self) -> None:
+        if self._plate_manager:
+            self._plate_manager.stop()
         if self.bot:
             self.bot.stop()
         if self._monitor_task:
@@ -257,10 +276,23 @@ class HomeMindCoordinator:
     # ------------------------------------------------------------------ #
 
     async def _startup_sequence(self) -> None:
-        """Testa API Gemini poi avvia il loop principale."""
+        """Testa API, inizializza ALPR, poi avvia il loop principale."""
         await asyncio.sleep(3)  # Attendi che HA sia pronto
 
         await self._init_model()
+
+        # Inizializza ALPR se configurato
+        if self.alpr_entities and self.vehicle_sensors:
+            from .plate_recognition import PlateRecognitionManager
+            self._plate_manager = PlateRecognitionManager(self)
+            try:
+                await self._plate_manager.async_init()
+                self.plates_today = await self._plate_manager.get_detection_count_today()
+                _LOGGER.info("HomeMind ALPR: attivo con %d entità", len(self.alpr_entities))
+            except Exception as exc:
+                _LOGGER.error("HomeMind ALPR: errore init — %s", exc)
+                self._plate_manager = None
+
         self._notify_sensors()
 
         if self.bot:
@@ -735,8 +767,8 @@ class HomeMindCoordinator:
     # ------------------------------------------------------------------ #
 
     async def _monitor_loop(self) -> None:
+        """Loop principale: analisi motion-triggered, digest consolidato, report."""
         morning_report_sent_date: str = ""
-        cameras_checked: int = 0
 
         while True:
             try:
@@ -745,19 +777,16 @@ class HomeMindCoordinator:
                 in_night = self._is_night_window()
                 everyone_away = self._everyone_away()
 
-                # Night mode
+                # Night mode toggle
                 new_mode = "active" if in_night else "inactive"
                 if self.night_mode != new_mode:
                     self.night_mode = new_mode
                     self._notify_sensors()
-                    if self.bot:
-                        if in_night:
-                            await self.bot.send_message(
-                                f"*Monitoraggio notturno attivo*\n"
-                                f"Dalle {now.strftime('%H:%M')} — scansione ogni 2 minuti."
-                            )
-                        else:
-                            await self.bot.send_message("Monitoraggio notturno terminato.")
+                    if self.bot and in_night:
+                        await self.bot.send_message(
+                            "*Monitoraggio notturno attivo*\n"
+                            f"Dalle {now.strftime('%H:%M')} — analisi basata su movimento."
+                        )
 
                 # Report mattutino
                 today = now.strftime("%Y-%m-%d")
@@ -765,10 +794,9 @@ class HomeMindCoordinator:
                     await self.send_morning_report()
                     morning_report_sent_date = today
 
-                # Analisi camere
+                # Analisi camere — SOLO su motion trigger
                 cameras = await self._get_cameras()
                 motion_sensors = await self._get_motion_sensors()
-                cameras_checked = 0
 
                 for cam_id in cameras:
                     last_ts = self._last_alert_times.get(cam_id, 0)
@@ -778,19 +806,67 @@ class HomeMindCoordinator:
                     cam_slug = cam_id.replace("camera.", "").lower()
                     motion_triggered = self._is_motion_triggered(cam_id, cam_slug, motion_sensors)
 
-                    should_analyze = motion_triggered or in_night or everyone_away
+                    # Analizza SOLO se c'è movimento (o casa vuota + notte)
+                    should_analyze = motion_triggered or (everyone_away and in_night)
+                    if not should_analyze:
+                        continue
 
-                    if should_analyze:
-                        result = await self.analyze_single_camera(cam_id)
-                        cameras_checked += 1
-                        if result and result.get("threat_detected"):
-                            self._last_alert_times[cam_id] = now_ts
+                    result = await self.analyze_single_camera(cam_id)
+                    if not result:
+                        continue
+
+                    has_event = result.get("has_event", False)
+                    threat_level = result.get("threat_level", "none")
+
+                    # NESSUN EVENTO → skip, non mandare nulla
+                    if not has_event:
+                        continue
+
+                    if result.get("threat_detected"):
+                        self._last_alert_times[cam_id] = now_ts
+
+                    # MEDIUM/HIGH → alert immediato con foto
+                    if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
+                        await self._send_security_alert(
+                            cam_id,
+                            result.get("camera_name", cam_id),
+                            result,
+                            self._last_snapshots.get(cam_id),
+                        )
+                    else:
+                        # LOW/eventi minori → accumula nel digest
+                        state = self.hass.states.get(cam_id)
+                        cam_name = (
+                            state.attributes.get("friendly_name", cam_id)
+                            if state else cam_id
+                        )
+                        self._pending_events.append({
+                            "time": now.strftime("%H:%M"),
+                            "camera_name": cam_name,
+                            "camera": cam_id,
+                            "description": result.get("description", ""),
+                            "summary": result.get("summary", ""),
+                            "threat_level": threat_level,
+                        })
+
+                # Invia digest consolidato se ci sono eventi pendenti
+                digest_interval = (
+                    self._digest_interval_night if in_night
+                    else self._digest_interval_day
+                )
+                if (
+                    self._pending_events
+                    and (now_ts - self._last_digest_ts) >= digest_interval
+                ):
+                    await self._send_digest()
+                    self._last_digest_ts = now_ts
 
                 # Aggiorna cameras_online
                 self.cameras_online = len(cameras)
                 self._notify_sensors()
 
-                sleep = 120 if in_night else (180 if everyone_away else 600)
+                # Intervallo: 60s notte, 90s casa vuota, 300s normali
+                sleep = 60 if in_night else (90 if everyone_away else 300)
                 await asyncio.sleep(sleep)
 
             except asyncio.CancelledError:
@@ -812,6 +888,44 @@ class HomeMindCoordinator:
             ):
                 return True
         return False
+
+    # ------------------------------------------------------------------ #
+    # Digest consolidato — un messaggio con tutti gli eventi minori
+    # ------------------------------------------------------------------ #
+
+    async def _send_digest(self) -> None:
+        """Invia un messaggio consolidato con tutti gli eventi pendenti."""
+        if not self._pending_events or not self.bot:
+            self._pending_events.clear()
+            return
+
+        events = self._pending_events.copy()
+        self._pending_events.clear()
+        now = datetime.now().strftime("%H:%M")
+        everyone_away = self._everyone_away()
+
+        lines = [
+            f"*Riepilogo eventi · {now}*"
+            + (" · Casa vuota" if everyone_away else ""),
+            "",
+        ]
+
+        for ev in events[-10:]:  # Max 10 eventi per digest
+            risk = ev.get("threat_level", "none").upper()
+            icon = "🟡" if risk == "LOW" else "⚪"
+            cam = ev.get("camera_name", "")
+            desc = ev.get("description", "")
+            nota = ev.get("summary", "")
+            lines.append(
+                f"{icon} *{cam}* · {ev.get('time', '')}\n"
+                f"   {desc}"
+                + (f"\n   _{nota}_" if nota and nota != desc else "")
+            )
+            lines.append("")
+
+        lines.append(f"Telecamere: {self.cameras_online} attive")
+
+        await self.bot.send_message("\n".join(lines))
 
     # ------------------------------------------------------------------ #
     # Alert sicurezza (Apple-minimal)

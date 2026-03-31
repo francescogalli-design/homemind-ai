@@ -12,6 +12,7 @@ from .const import (
     AI_PROVIDER_OLLAMA,
     AI_PROVIDERS,
     CONF_AI_PROVIDER,
+    CONF_ALPR_ENTITIES,
     CONF_CAMERAS,
     CONF_GEMINI_API_KEY,
     CONF_GEMINI_MODEL,
@@ -23,6 +24,7 @@ from .const import (
     CONF_OLLAMA_MODEL,
     CONF_TELEGRAM_CHAT_ID,
     CONF_TELEGRAM_TOKEN,
+    CONF_VEHICLE_SENSORS,
     DEFAULT_AI_PROVIDER,
     DEFAULT_GEMINI_MODEL,
     DEFAULT_MORNING_REPORT_HOUR,
@@ -67,6 +69,14 @@ def _step2_schema(current_cameras: list | None = None, current_sensors: list | N
             vol.Optional(CONF_MOTION_SENSORS, default=current_sensors or []): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
             ),
+            # ALPR — riconoscimento targhe
+            vol.Optional(CONF_VEHICLE_SENSORS, default=[]): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+            ),
+            vol.Optional(CONF_ALPR_ENTITIES, default=[]): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="image_processing", multiple=True)
+            ),
+            # Orari
             vol.Optional(CONF_NIGHT_START, default=DEFAULT_NIGHT_START): vol.All(
                 vol.Coerce(int), vol.Range(min=0, max=23)
             ),
@@ -204,6 +214,20 @@ class HomeMindOptionsFlow(config_entries.OptionsFlow):
                     default=cur.get(CONF_MOTION_SENSORS, []),
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+                ),
+
+                # ---- ALPR (targhe) ----
+                vol.Optional(
+                    CONF_VEHICLE_SENSORS,
+                    default=cur.get(CONF_VEHICLE_SENSORS, []),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="binary_sensor", multiple=True)
+                ),
+                vol.Optional(
+                    CONF_ALPR_ENTITIES,
+                    default=cur.get(CONF_ALPR_ENTITIES, []),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="image_processing", multiple=True)
                 ),
 
                 # ---- Orari ----

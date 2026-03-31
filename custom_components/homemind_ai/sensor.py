@@ -30,6 +30,9 @@ async def async_setup_entry(
         HomeMindSensor(coordinator, "cameras_online",  "HomeMind Cameras Online", "mdi:cctv",              "cameras"),
         HomeMindSensor(coordinator, "bot_status",      "HomeMind Bot Status",     "mdi:send",              None),
         HomeMindSensor(coordinator, "internet_status", "HomeMind Internet",        "mdi:web",               None),
+        # ALPR
+        HomeMindSensor(coordinator, "last_plate",      "HomeMind Ultima Targa",   "mdi:car",               None),
+        HomeMindSensor(coordinator, "plates_today",    "HomeMind Targhe Oggi",    "mdi:counter",           "targhe"),
     ]
 
     async_add_entities(entities)

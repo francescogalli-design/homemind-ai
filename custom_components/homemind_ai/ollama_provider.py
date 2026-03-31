@@ -79,17 +79,12 @@ async def analyze_camera_image_ollama(
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     prompt = (
-        f"Analizza questa immagine della telecamera '{camera_name}' "
-        "per la sicurezza domestica. Rispondi SOLO in italiano.\n\n"
-        "Descrivi:\n"
-        "1. Cosa vedi (persone, animali, veicoli, oggetti insoliti)\n"
-        "2. C'è qualcosa di sospetto o insolito?\n"
-        "3. Livello di rischio: NESSUNO, BASSO, MEDIO o ALTO\n\n"
-        "Formato risposta:\n"
-        "DESCRIZIONE: [descrizione]\n"
-        "INSOLITO: [sì/no — cosa]\n"
+        f"Telecamera sicurezza '{camera_name}'. Analizza SOLO eventi rilevanti.\n"
+        "Se la scena è normale (nessuna persona, veicolo, animale o oggetto insolito): rispondi SOLO \"NESSUN EVENTO\"\n"
+        "Se c'è un evento, rispondi con questo formato esatto:\n"
+        "EVENTO: [cosa succede — max 1 riga]\n"
         "RISCHIO: [NESSUNO/BASSO/MEDIO/ALTO]\n"
-        "RIEPILOGO: [una frase breve]"
+        "NOTA: [perché è rilevante — max 1 riga]"
     )
 
     payload = {
@@ -222,23 +217,26 @@ async def ask_ollama_security(
 
 
 def _parse_response(raw: str, camera_name: str) -> dict[str, Any]:
-    """Parsea risposta strutturata (stessa logica di gemini_vision)."""
+    """Parsea risposta strutturata (formato evento)."""
     result: dict[str, Any] = {
         "camera": camera_name,
         "description": "",
         "unusual": "",
         "threat_level": "none",
         "threat_detected": False,
+        "has_event": False,
         "summary": "",
         "raw_response": raw,
     }
 
+    if "NESSUN EVENTO" in raw.upper():
+        return result
+
+    result["has_event"] = True
     for line in raw.splitlines():
         line = line.strip()
-        if line.startswith("DESCRIZIONE:"):
-            result["description"] = line.replace("DESCRIZIONE:", "").strip()
-        elif line.startswith("INSOLITO:"):
-            result["unusual"] = line.replace("INSOLITO:", "").strip()
+        if line.startswith("EVENTO:"):
+            result["description"] = line.replace("EVENTO:", "").strip()
         elif line.startswith("RISCHIO:"):
             level = line.replace("RISCHIO:", "").strip().upper()
             if "ALTO" in level:
@@ -249,8 +247,8 @@ def _parse_response(raw: str, camera_name: str) -> dict[str, Any]:
                 result["threat_detected"] = True
             elif "BASSO" in level:
                 result["threat_level"] = "low"
-        elif line.startswith("RIEPILOGO:"):
-            result["summary"] = line.replace("RIEPILOGO:", "").strip()
+        elif line.startswith("NOTA:"):
+            result["summary"] = line.replace("NOTA:", "").strip()
 
     if not result["description"]:
         result["description"] = raw
@@ -266,6 +264,7 @@ def _error_result(camera_name: str, error: str) -> dict[str, Any]:
         "unusual": "",
         "threat_level": "none",
         "threat_detected": False,
+        "has_event": False,
         "summary": f"Errore: {error}",
         "error": error,
     }

@@ -197,6 +197,10 @@ class TelegramBot:
             await self._cmd_sensori(chat_id)
             return
 
+        if t in ("/targhe", "targhe", "plate", "alpr"):
+            await self._cmd_targhe(chat_id)
+            return
+
         if t in ("/report", "report", "report sicurezza", "report notturno"):
             await self._coord.send_morning_report(force=True)
             return
@@ -451,32 +455,83 @@ class TelegramBot:
         cams_all = await coord._get_all_cameras_raw()
         cams_ok = await coord._get_cameras()
         motion_sensors = await coord._get_motion_sensors()
+        from .const import VERSION
+
+        provider_label = {
+            "ha_gemini": "HA Gemini",
+            "gemini": f"Gemini REST ({coord._active_model})",
+            "ollama": f"Ollama ({coord.ollama_model})",
+        }.get(coord.ai_provider, coord.ai_provider)
 
         lines = [
             "*HomeMind AI — Debug*",
             "",
-            f"Versione    2.1.0",
-            f"Stato API   {coord.api_health}",
-            f"Modello     {coord.gemini_model}",
+            f"Versione    {VERSION}",
+            f"Provider    {provider_label}",
+            f"Stato AI    {coord.api_health}",
             f"Bot         {coord.bot_status}",
             f"Notte       {'attiva' if coord.night_mode == 'active' else 'inattiva'}  ({coord.night_start}:00–{coord.night_end}:00)",
             "",
-            f"Camere tot  {len(cams_all)}",
-            f"Camere ok   {len(cams_ok)}",
-            f"Non supp.   {len(coord._unsupported_cameras)}",
-            f"Sens. mov.  {len(motion_sensors)}",
-            f"Alert nott. {coord.alerts_tonight}",
-            "",
+            f"*Telecamere*",
+            f"  Totali {len(cams_all)} · Attive {len(cams_ok)} · Non supp. {len(coord._unsupported_cameras)}",
+            f"*Sensori movimento*  {len(motion_sensors)}",
+            f"*Alert notturni*  {coord.alerts_tonight}",
         ]
+
+        # ALPR
+        if coord.alpr_entities:
+            lines += [
+                "",
+                f"*ALPR (targhe)*",
+                f"  Entità {len(coord.alpr_entities)} · Oggi {coord.plates_today}",
+            ]
+            if coord.last_plate:
+                lines.append(f"  Ultima: `{coord.last_plate}`")
+
         if coord._unsupported_cameras:
-            lines.append("*Camere escluse (virtuali):*")
+            lines += ["", "*Camere escluse:*"]
             for cam_id in coord._unsupported_cameras:
                 s = self._hass.states.get(cam_id)
                 name = s.attributes.get("friendly_name", cam_id) if s else cam_id
                 lines.append(f"  {name}")
-            lines.append("")
         if coord.last_error:
-            lines.append(f"*Ultimo errore:*\n{coord.last_error}")
+            lines += ["", f"*Ultimo errore:*\n{coord.last_error}"]
+
+        await self.send_message("\n".join(lines), chat_id)
+
+    async def _cmd_targhe(self, chat_id: str) -> None:
+        """Mostra statistiche e ultimi rilevamenti targhe."""
+        coord = self._coord
+        if not coord._plate_manager:
+            await self.send_message(
+                "ALPR non configurato.\n\n"
+                "Vai in Impostazioni → HomeMind AI → Configura e aggiungi "
+                "le entità image\\_processing e i sensori veicolo.",
+                chat_id,
+            )
+            return
+
+        stats = await coord._plate_manager.get_plate_stats()
+        recent = await coord._plate_manager.get_recent_detections(limit=5)
+
+        lines = [
+            "*Targhe — ALPR*",
+            "",
+            f"Oggi  {stats.get('detections_today', 0)} rilevamenti",
+            f"Totali  {stats.get('total_detections', 0)}",
+            f"Targhe uniche  {stats.get('unique_plates', 0)}",
+            f"Targhe note  {stats.get('known_plates', 0)}",
+        ]
+
+        if recent:
+            lines += ["", "*Ultimi rilevamenti:*"]
+            for det in recent:
+                plate = det.get("plate", "")
+                conf = det.get("confidence", 0)
+                cam = det.get("camera", "").replace("image_processing.", "")
+                ts = det.get("timestamp", "")[:16].replace("T", " ")
+                known = "✓" if det.get("known") else "?"
+                lines.append(f"  `{plate}` {known} · {conf:.0%} · {cam} · {ts}")
 
         await self.send_message("\n".join(lines), chat_id)
 
@@ -563,21 +618,31 @@ class TelegramBot:
 
     async def _cmd_ai_query(self, question: str, chat_id: str) -> None:
         from .ha_context import build_home_context
-        from .ai_provider import ask_gemini
 
         await self.send_message("...", chat_id)
 
         context = build_home_context(
             self._hass, cameras=await self._coord._get_cameras()
         )
-        session = async_get_clientsession(self._hass)
-        answer = await ask_gemini(
-            session=session,
-            api_key=self._coord.api_key,
-            model=self._coord.gemini_model,
-            question=question,
-            home_context=context,
-        )
+        coord = self._coord
+
+        if coord.ai_provider == "ha_gemini":
+            from .ha_gemini_provider import ask_ha_gemini
+            answer = await ask_ha_gemini(self._hass, question, context)
+        elif coord.ai_provider == "ollama":
+            from .ollama_provider import ask_ollama
+            session = async_get_clientsession(self._hass)
+            answer = await ask_ollama(session, coord.ollama_host, coord._active_model, question, context)
+        else:
+            from .ai_provider import ask_gemini
+            session = async_get_clientsession(self._hass)
+            answer = await ask_gemini(
+                session=session,
+                api_key=coord.api_key,
+                model=coord._active_model,
+                question=question,
+                home_context=context,
+            )
         await self.send_message(answer, chat_id)
 
 
@@ -588,22 +653,23 @@ class TelegramBot:
 def _help_text() -> str:
     return (
         "*HomeMind AI*\n\n"
-        "*Stato*\n"
-        "/stato — Riepilogo casa\n"
+        "*Stato casa*\n"
+        "/stato — Riepilogo\n"
         "/persone — Chi è in casa\n"
         "/luci — Stato luci\n"
-        "/tapparelle — Posizione coperture\n"
+        "/tapparelle — Coperture\n"
         "/temperatura — Sensori e termostati\n"
         "/allarme — Pannello allarme\n\n"
         "*Sicurezza*\n"
-        "/camere — Lista telecamere\n"
-        "/analizza — Analisi AI di tutte le camere\n"
-        "/sensori — Sensori di movimento\n"
+        "/camere — Telecamere\n"
+        "/analizza — Analisi AI camere\n"
+        "/sensori — Sensori movimento\n"
+        "/targhe — Storico targhe ALPR\n"
         "/report — Report notturno\n"
         "/svuota — Azzera alert\n\n"
         "*Diagnostica*\n"
-        "/debug — Stato API, modello, errori\n\n"
-        "Oppure scrivi qualsiasi domanda sulla tua casa."
+        "/debug — Provider AI, errori, stato\n\n"
+        "Scrivi qualsiasi domanda sulla tua casa."
     )
 
 

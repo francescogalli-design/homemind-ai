@@ -197,6 +197,10 @@ class TelegramBot:
             await self._cmd_sensori(chat_id)
             return
 
+        if t in ("/internet", "internet", "connessione"):
+            await self._cmd_internet(chat_id)
+            return
+
         if t in ("/targhe", "targhe", "plate", "alpr"):
             await self._cmd_targhe(chat_id)
             return
@@ -450,6 +454,17 @@ class TelegramBot:
             lines.append(f"  {'ATTIVO' if active else 'inattivo'}   {name}")
         await self.send_message("\n".join(lines), chat_id)
 
+    async def _cmd_internet(self, chat_id: str) -> None:
+        coord = self._coord
+        status = coord.internet_status
+        emoji = "🟢" if status == "online" else "🔴" if status == "offline" else "⚪"
+        lines = [
+            f"*Internet · {emoji} {status.upper()}*",
+            "",
+            f"Ollama  {coord.api_health}",
+        ]
+        await self.send_message("\n".join(lines), chat_id)
+
     async def _cmd_debug(self, chat_id: str) -> None:
         coord = self._coord
         cams_all = await coord._get_all_cameras_raw()
@@ -457,11 +472,7 @@ class TelegramBot:
         motion_sensors = await coord._get_motion_sensors()
         from .const import VERSION
 
-        provider_label = {
-            "ha_gemini": "HA Gemini",
-            "gemini": f"Gemini REST ({coord._active_model})",
-            "ollama": f"Ollama ({coord.ollama_model})",
-        }.get(coord.ai_provider, coord.ai_provider)
+        provider_label = f"Ollama ({coord.ollama_model})"
 
         lines = [
             "*HomeMind AI — Debug*",
@@ -579,7 +590,7 @@ class TelegramBot:
                 )
             return
 
-        # Analisi Gemini Vision (riusa lo snapshot già in cache)
+        # Analisi Ollama Vision (riusa lo snapshot già in cache)
         result = await coord.analyze_single_camera(cam_id)
         if not result:
             await self.send_message(f"*{cam_name}*\n\nAnalisi non disponibile.", chat_id)
@@ -618,6 +629,7 @@ class TelegramBot:
 
     async def _cmd_ai_query(self, question: str, chat_id: str) -> None:
         from .ha_context import build_home_context
+        from .ollama_provider import ask_ollama
 
         await self.send_message("...", chat_id)
 
@@ -625,24 +637,11 @@ class TelegramBot:
             self._hass, cameras=await self._coord._get_cameras()
         )
         coord = self._coord
-
-        if coord.ai_provider == "ha_gemini":
-            from .ha_gemini_provider import ask_ha_gemini
-            answer = await ask_ha_gemini(self._hass, question, context)
-        elif coord.ai_provider == "ollama":
-            from .ollama_provider import ask_ollama
-            session = async_get_clientsession(self._hass)
-            answer = await ask_ollama(session, coord.ollama_host, coord._active_model, question, context)
-        else:
-            from .ai_provider import ask_gemini
-            session = async_get_clientsession(self._hass)
-            answer = await ask_gemini(
-                session=session,
-                api_key=coord.api_key,
-                model=coord._active_model,
-                question=question,
-                home_context=context,
-            )
+        session = async_get_clientsession(self._hass)
+        answer = await ask_ollama(
+            session, coord.ollama_host, coord.ollama_model,
+            question, context,
+        )
         await self.send_message(answer, chat_id)
 
 
@@ -668,7 +667,8 @@ def _help_text() -> str:
         "/report — Report notturno\n"
         "/svuota — Azzera alert\n\n"
         "*Diagnostica*\n"
-        "/debug — Provider AI, errori, stato\n\n"
+        "/debug — Ollama, errori, stato\n"
+        "/internet — Stato connessione\n\n"
         "Scrivi qualsiasi domanda sulla tua casa."
     )
 

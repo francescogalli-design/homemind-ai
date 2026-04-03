@@ -1,4 +1,4 @@
-"""HomeMind AI — assistente AI proattivo per Home Assistant con Gemini Vision."""
+"""HomeMind AI v4.0 — sicurezza camera 100% locale con Ollama, zero costi."""
 from __future__ import annotations
 
 import asyncio
@@ -13,9 +13,6 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
-    AI_PROVIDER_GEMINI,
-    AI_PROVIDER_HA_GEMINI,
-    AI_PROVIDER_OLLAMA,
     CONF_AI_PROVIDER,
     CONF_ALPR_ENTITIES,
     CONF_CAMERAS,
@@ -27,34 +24,68 @@ from .const import (
     CONF_NIGHT_START,
     CONF_OLLAMA_HOST,
     CONF_OLLAMA_MODEL,
+    CONF_PERSON_ENTITY,
     CONF_TELEGRAM_CHAT_ID,
     CONF_TELEGRAM_TOKEN,
     CONF_VEHICLE_SENSORS,
-    DEFAULT_AI_PROVIDER,
-    DEFAULT_GEMINI_MODEL,
     DEFAULT_MORNING_REPORT_HOUR,
     DEFAULT_NIGHT_END,
     DEFAULT_NIGHT_START,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_OLLAMA_MODEL,
     DOMAIN,
-    GEMINI_FALLBACK_ORDER,
+    INTERNET_CHECK_INTERVAL,
+    INTERNET_CHECK_TARGETS,
+    INTERVAL_AWAY_DAY,
+    INTERVAL_AWAY_NIGHT,
+    INTERVAL_HOME_DAY,
+    INTERVAL_HOME_NIGHT,
     PING_ENTITY,
     SERVICE_ANALYZE_CAMERA,
     SERVICE_ASK_AI,
     SERVICE_CLEAR_ALERTS,
     SERVICE_GENERATE_REPORT,
+    SERVICE_VALIDATE_PLATE,
     THREAT_HIGH,
     THREAT_LOW,
     THREAT_MEDIUM,
 )
-from .gemini_vision import analyze_camera_image
+from .ollama_provider import (
+    analyze_camera_image_ollama,
+    ask_ollama,
+    ask_ollama_security,
+    check_plate_visible,
+    test_ollama,
+)
+from .notification_engine import NotificationEngine, format_digest_message
 from .telegram_bot import TelegramBot
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR]
 
-_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+# ── Migrazione config entry v1/v2/v3 → v4 ───────────────────────
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migra config entries da versioni precedenti a v4 (solo Ollama)."""
+    if entry.version < 4:
+        _LOGGER.info("Migrazione HomeMind AI v%s → v4: rimuovo Gemini, solo Ollama", entry.version)
+        new_data = dict(entry.data)
+        # Rimuovi campi Gemini/provider
+        new_data.pop(CONF_GEMINI_API_KEY, None)
+        new_data.pop(CONF_GEMINI_MODEL, None)
+        new_data.pop(CONF_AI_PROVIDER, None)
+        # Aggiungi default Ollama
+        new_data.setdefault(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST)
+        new_data.setdefault(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
+        new_data.setdefault(CONF_PERSON_ENTITY, "")
+        hass.config_entries.async_update_entry(entry, data=new_data, version=4)
+        _LOGGER.info("Migrazione completata a v4")
+    return True
+
+
+# ── Setup / Unload ───────────────────────────────────────────────
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -71,10 +102,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_analyze_camera(call: ServiceCall) -> None:
         entity_id = call.data.get("entity_id", "").strip()
-        if not entity_id:
-            _LOGGER.warning("analyze_camera: entity_id mancante")
-            return
-        await coordinator.analyze_single_camera(entity_id)
+        if entity_id:
+            await coordinator.analyze_single_camera(entity_id, force_notify=True)
 
     async def handle_generate_report(call: ServiceCall) -> None:
         await coordinator.send_morning_report(force=True)
@@ -83,6 +112,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.night_events.clear()
         coordinator.alerts_tonight = 0
         coordinator.last_alert = ""
+        coordinator.notifier.force_reset()
         coordinator._notify_sensors()
 
     async def handle_ask_ai(call: ServiceCall) -> None:
@@ -92,41 +122,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .ha_context import build_home_context
         context = build_home_context(hass, cameras=await coordinator._get_cameras())
         session = async_get_clientsession(hass)
-
-        if coordinator.ai_provider == AI_PROVIDER_HA_GEMINI:
-            from .ha_gemini_provider import ask_ha_gemini
-            answer = await ask_ha_gemini(hass, question, context)
-        elif coordinator.ai_provider == AI_PROVIDER_OLLAMA:
-            from .ollama_provider import ask_ollama
-            answer = await ask_ollama(session, coordinator.ollama_host, coordinator._active_model, question, context)
-        else:
-            from .ai_provider import ask_gemini
-            answer = await ask_gemini(
-                session=session,
-                api_key=coordinator.api_key,
-                model=coordinator._active_model,
-                question=question,
-                home_context=context,
-            )
-
+        answer = await ask_ollama(
+            session, coordinator.ollama_host, coordinator.ollama_model,
+            question, context,
+        )
         coordinator.last_ai_answer = answer[:255]
         coordinator._notify_sensors()
         if coordinator.bot:
             await coordinator.bot.send_message(answer)
 
+    async def handle_validate_plate(call: ServiceCall) -> None:
+        """Pre-validazione ALPR: Ollama verifica se c'è targa visibile."""
+        entity_id = call.data.get("entity_id", "").strip()
+        if not entity_id:
+            return
+        image_bytes = await coordinator._get_camera_snapshot(entity_id)
+        if not image_bytes:
+            return
+        session = async_get_clientsession(hass)
+        visible = await check_plate_visible(
+            session, coordinator.ollama_host, coordinator.ollama_model, image_bytes,
+        )
+        hass.bus.async_fire("homemind_plate_check", {
+            "entity_id": entity_id,
+            "plate_visible": visible,
+        })
+        _LOGGER.info("Plate check %s: %s", entity_id, "visibile" if visible else "non visibile")
+
     hass.services.async_register(
-        DOMAIN,
-        SERVICE_ANALYZE_CAMERA,
-        handle_analyze_camera,
+        DOMAIN, SERVICE_ANALYZE_CAMERA, handle_analyze_camera,
         schema=vol.Schema({vol.Required("entity_id"): cv.entity_id}),
     )
     hass.services.async_register(DOMAIN, SERVICE_GENERATE_REPORT, handle_generate_report)
     hass.services.async_register(DOMAIN, SERVICE_CLEAR_ALERTS, handle_clear_alerts)
     hass.services.async_register(
-        DOMAIN,
-        SERVICE_ASK_AI,
-        handle_ask_ai,
+        DOMAIN, SERVICE_ASK_AI, handle_ask_ai,
         schema=vol.Schema({vol.Required("question"): str}),
+    )
+    hass.services.async_register(
+        DOMAIN, SERVICE_VALIDATE_PLATE, handle_validate_plate,
+        schema=vol.Schema({vol.Required("entity_id"): cv.entity_id}),
     )
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
@@ -141,13 +176,16 @@ async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator: HomeMindCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
     coordinator.stop()
-    for service in (SERVICE_ANALYZE_CAMERA, SERVICE_GENERATE_REPORT, SERVICE_CLEAR_ALERTS, SERVICE_ASK_AI):
-        hass.services.async_remove(DOMAIN, service)
+    for svc in (SERVICE_ANALYZE_CAMERA, SERVICE_GENERATE_REPORT, SERVICE_CLEAR_ALERTS, SERVICE_ASK_AI, SERVICE_VALIDATE_PLATE):
+        hass.services.async_remove(DOMAIN, svc)
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
+# ── Coordinator ──────────────────────────────────────────────────
+
+
 class HomeMindCoordinator:
-    """Coordinatore principale di HomeMind AI."""
+    """Coordinatore principale di HomeMind AI v4 — solo Ollama locale."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -155,16 +193,14 @@ class HomeMindCoordinator:
 
         cfg = {**entry.data, **entry.options}
 
-        # Configurazione provider AI
-        self.ai_provider: str = cfg.get(CONF_AI_PROVIDER, DEFAULT_AI_PROVIDER)
-        self.api_key: str = cfg.get(CONF_GEMINI_API_KEY, "").strip()
-        self.gemini_model: str = cfg.get(CONF_GEMINI_MODEL, DEFAULT_GEMINI_MODEL)
+        # Configurazione Ollama
         self.ollama_host: str = cfg.get(CONF_OLLAMA_HOST, DEFAULT_OLLAMA_HOST).rstrip("/")
         self.ollama_model: str = cfg.get(CONF_OLLAMA_MODEL, DEFAULT_OLLAMA_MODEL)
         self.telegram_token: str = cfg.get(CONF_TELEGRAM_TOKEN, "")
         self.telegram_chat_id: str = str(cfg.get(CONF_TELEGRAM_CHAT_ID, "")).strip()
         self.configured_cameras: list[str] = cfg.get(CONF_CAMERAS, [])
         self.configured_motion_sensors: list[str] = cfg.get(CONF_MOTION_SENSORS, [])
+        self.person_entity: str = cfg.get(CONF_PERSON_ENTITY, "")
         self.night_start: int = cfg.get(CONF_NIGHT_START, DEFAULT_NIGHT_START)
         self.night_end: int = cfg.get(CONF_NIGHT_END, DEFAULT_NIGHT_END)
         self.morning_report_hour: int = cfg.get(CONF_MORNING_REPORT_HOUR, DEFAULT_MORNING_REPORT_HOUR)
@@ -188,44 +224,41 @@ class HomeMindCoordinator:
         self.bot_status: str = "not_configured"
         self.internet_status: str = "unknown"
 
-        # Modello effettivamente in uso (può essere fallback temporaneo)
-        # gemini_model = scelta utente dal config (non cambia mai)
-        # _active_model = quello realmente usato nelle chiamate API
-        self._active_model: str = self.gemini_model
-
         # Sicurezza
         self.night_events: list[dict] = []
         self._last_alert_times: dict[str, float] = {}
-        self._alert_cooldown: int = 300
 
         # Cross-camera correlation
         self._recent_motion_cams: list[tuple[str, float]] = []
         self._cross_camera_window: int = 120
 
-        # Cache snapshot per invio foto bot
+        # Cache snapshot
         self._last_snapshots: dict[str, bytes] = {}
-
-        # Set camere non supportate (es. slideshow virtuali)
         self._unsupported_cameras: set[str] = set()
 
-        # Digest: raccogli eventi, invio periodico consolidato
+        # Digest eventi minori
         self._pending_events: list[dict] = []
         self._last_digest_ts: float = 0
-        self._digest_interval_night: int = 900   # 15 min
-        self._digest_interval_day: int = 1800    # 30 min
+        self._digest_interval_night: int = 900
+        self._digest_interval_day: int = 1800
 
         # ALPR state
         self.last_plate: str = ""
         self.plates_today: int = 0
-        self._plate_manager = None  # type: PlateRecognitionManager | None
+        self._plate_manager = None
+
+        # Notification engine
+        self.notifier = NotificationEngine()
+
+        # Internet monitor
+        self._internet_was_offline: bool = False
 
         self._sensor_callbacks: list = []
         self.bot: TelegramBot | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._internet_task: asyncio.Task | None = None
 
-    # ------------------------------------------------------------------ #
-    # Lifecycle
-    # ------------------------------------------------------------------ #
+    # ── Lifecycle ────────────────────────────────────────────
 
     def start(self) -> None:
         if self.telegram_token and self.telegram_chat_id:
@@ -236,11 +269,10 @@ class HomeMindCoordinator:
             self.bot_status = "not_configured"
 
         self._monitor_task = self.hass.loop.create_task(self._startup_sequence())
+        self._internet_task = self.hass.loop.create_task(self._internet_monitor_loop())
         _LOGGER.info(
-            "HomeMind AI: avvio — camere=%d, provider=%s, bot=%s",
-            len(self.configured_cameras),
-            self.ai_provider,
-            self.bot_status,
+            "HomeMind AI v4: avvio — Ollama @ %s, modello=%s, camere=%d",
+            self.ollama_host, self.ollama_model, len(self.configured_cameras),
         )
 
     def stop(self) -> None:
@@ -248,40 +280,99 @@ class HomeMindCoordinator:
             self._plate_manager.stop()
         if self.bot:
             self.bot.stop()
-        if self._monitor_task:
-            self._monitor_task.cancel()
+        for task in (self._monitor_task, self._internet_task):
+            if task:
+                task.cancel()
 
-    # ------------------------------------------------------------------ #
-    # Startup: test API → avvia monitoraggio
-    # ------------------------------------------------------------------ #
+    # ── Internet connectivity ────────────────────────────────
 
-    # ------------------------------------------------------------------ #
-    # Internet connectivity
-    # ------------------------------------------------------------------ #
-
-    def _check_internet(self) -> bool | None:
-        """
-        Verifica connessione internet tramite binary_sensor.8_8_8_8 (ping Google DNS).
-        Returns True=online, False=offline, None=entità non presente.
-        """
+    def _check_internet_ping(self) -> bool | None:
+        """Check internet via binary_sensor.8_8_8_8 (ping integration)."""
         state = self.hass.states.get(PING_ENTITY)
         if state is None:
-            return None  # Integrazione ping non configurata
+            return None
         if state.state in ("unavailable", "unknown"):
             return None
         return state.state == "on"
 
-    # ------------------------------------------------------------------ #
-    # Startup sequence
-    # ------------------------------------------------------------------ #
+    async def _internet_monitor_loop(self) -> None:
+        """Loop separato per monitoraggio internet con fallback HTTP."""
+        while True:
+            try:
+                # Prima prova il ping entity (gratuito, nessuna chiamata)
+                ping_result = self._check_internet_ping()
+                if ping_result is not None:
+                    online = ping_result
+                else:
+                    # Fallback: HTTP check
+                    session = async_get_clientsession(self.hass)
+                    online = False
+                    for target in INTERNET_CHECK_TARGETS:
+                        try:
+                            async with session.get(
+                                target, timeout=aiohttp.ClientTimeout(total=8),
+                            ) as resp:
+                                if resp.status < 500:
+                                    online = True
+                                    break
+                        except Exception:
+                            continue
+
+                old_status = self.internet_status
+                self.internet_status = "online" if online else "offline"
+
+                if old_status != self.internet_status:
+                    self._notify_sensors()
+
+                    if self.internet_status == "offline" and not self._internet_was_offline:
+                        self._internet_was_offline = True
+                        _LOGGER.warning("HomeMind AI: internet OFFLINE")
+                        if not self._is_everyone_home() and self.bot:
+                            await self.bot.send_message(
+                                "⚠️ *HomeMind AI*\n\n"
+                                "🔴 Internet **perso**. "
+                                "Il monitoraggio AI locale continua.\n"
+                                f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                            )
+
+                    elif self.internet_status == "online" and self._internet_was_offline:
+                        self._internet_was_offline = False
+                        _LOGGER.info("HomeMind AI: internet ripristinato")
+                        if not self._is_everyone_home() and self.bot:
+                            await self.bot.send_message(
+                                "✅ *HomeMind AI*\n\n"
+                                "🟢 Internet **ripristinato**.\n"
+                                f"📅 {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                            )
+
+                await asyncio.sleep(INTERNET_CHECK_INTERVAL)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                _LOGGER.error("Internet monitor: %s", exc)
+                await asyncio.sleep(60)
+
+    # ── Startup ──────────────────────────────────────────────
 
     async def _startup_sequence(self) -> None:
-        """Testa API, inizializza ALPR, poi avvia il loop principale."""
-        await asyncio.sleep(3)  # Attendi che HA sia pronto
+        """Testa Ollama, inizializza ALPR, avvia monitor loop."""
+        await asyncio.sleep(3)
 
-        await self._init_model()
+        session = async_get_clientsession(self.hass)
+        ok, msg = await test_ollama(session, self.ollama_host, self.ollama_model)
+        if ok:
+            self.api_health = f"Online — Ollama ({self.ollama_model})"
+            self.ai_status = "online"
+            self.last_error = ""
+            _LOGGER.info("HomeMind: Ollama OK — %s", msg)
+        else:
+            self.api_health = f"Errore Ollama — {msg[:80]}"
+            self.ai_status = "error"
+            self.last_error = msg
+            _LOGGER.error("HomeMind: Ollama non disponibile — %s", msg)
 
-        # Inizializza ALPR se configurato
+        # ALPR
         if self.alpr_entities and self.vehicle_sensors:
             from .plate_recognition import PlateRecognitionManager
             self._plate_manager = PlateRecognitionManager(self)
@@ -295,195 +386,26 @@ class HomeMindCoordinator:
 
         self._notify_sensors()
 
-        if self.bot:
-            if self.ai_status == "online":
-                cams = await self._get_cameras()
-                provider_label = {
-                    AI_PROVIDER_HA_GEMINI: "Google Gemini (integrazione HA)",
-                    AI_PROVIDER_OLLAMA: f"Ollama — {self._active_model}",
-                    AI_PROVIDER_GEMINI: self._active_model
-                        + (f" _(fallback da {self.gemini_model})_" if self._active_model != self.gemini_model else ""),
-                }.get(self.ai_provider, self._active_model)
-                await self.bot.send_message(
-                    f"*HomeMind AI* avviato\n\n"
-                    f"AI  {provider_label}\n"
-                    f"Telecamere  {len(cams) if cams else 'autodetect'}\n"
-                    f"Notte  {self.night_start}:00 — {self.night_end}:00\n\n"
-                    f"Scrivi /help per i comandi."
-                )
-            elif self.ai_status in ("error", "offline"):
-                await self.bot.send_message(
-                    f"*HomeMind AI* — avvio con errore\n\n"
-                    f"{self.last_error}\n\n"
-                    + ("Controlla la connessione internet di HA." if self.ai_status == "offline"
-                       else "Verifica la Gemini API key in Impostazioni → Integrazioni → HomeMind AI → Configura.")
-                )
+        if self.bot and self.ai_status == "online":
+            cams = await self._get_cameras()
+            home_status = "Casa" if self._is_everyone_home() else "Fuori"
+            await self.bot.send_message(
+                f"*HomeMind AI v4* avviato\n\n"
+                f"AI  Ollama ({self.ollama_model})\n"
+                f"Telecamere  {len(cams) if cams else 'autodetect'}\n"
+                f"Notte  {self.night_start}:00 — {self.night_end}:00\n"
+                f"Stato  {home_status}\n\n"
+                f"Zero costi — 100% locale. Scrivi /help per i comandi."
+            )
+        elif self.bot:
+            await self.bot.send_message(
+                f"*HomeMind AI v4* — errore avvio\n\n{self.last_error}\n\n"
+                "Verifica che Ollama sia avviato: `ollama serve`"
+            )
 
         await self._monitor_loop()
 
-    # ------------------------------------------------------------------ #
-    # Gemini model validation (rispetta la scelta utente)
-    # ------------------------------------------------------------------ #
-
-    async def _test_gemini_model(self, model: str) -> tuple[bool, str]:
-        """Richiesta minimale a Gemini per testare un modello. Returns (ok, message)."""
-        session = async_get_clientsession(self.hass)
-        url = _GEMINI_URL.format(model=model)
-        payload = {
-            "contents": [{"parts": [{"text": "Test."}]}],
-            "generationConfig": {"maxOutputTokens": 5},
-        }
-        try:
-            async with session.post(
-                f"{url}?key={self.api_key}",
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status == 200:
-                    return True, f"Online — {model}"
-                body = await resp.text()
-                if resp.status == 404:
-                    return False, f"Modello '{model}' non trovato (404) — potrebbe non essere disponibile con la tua API key"
-                if resp.status == 400:
-                    import json as _json
-                    try:
-                        err = _json.loads(body).get("error", {}).get("message", body[:100])
-                    except Exception:
-                        err = body[:100]
-                    return False, f"Richiesta non valida: {err}"
-                if resp.status == 401:
-                    return False, "API key non valida (401) — verifica la chiave in Impostazioni"
-                if resp.status == 403:
-                    return False, "API key non autorizzata (403) — verifica i permessi su aistudio.google.com"
-                if resp.status == 429:
-                    return False, f"Limite richieste raggiunto (429) per {model}"
-                return False, f"Errore HTTP {resp.status}"
-        except asyncio.TimeoutError:
-            return False, "Timeout — Gemini non raggiungibile"
-        except Exception as exc:
-            return False, f"Connessione fallita: {exc}"
-
-    async def _init_model(self) -> None:
-        """
-        Valida il provider AI configurato.
-
-        Provider supportati:
-        - ha_gemini : usa l'integrazione HA google_generative_ai_conversation (consigliato)
-        - gemini    : chiamate REST dirette (richiede API key AI Studio)
-        - ollama    : Ollama locale (nessuna API key)
-        """
-        # ----------------------------------------------------------------
-        # Provider: HA Gemini integration (usa l'integrazione già in HA)
-        # ----------------------------------------------------------------
-        if self.ai_provider == AI_PROVIDER_HA_GEMINI:
-            from .ha_gemini_provider import test_ha_gemini
-            ok, msg = await test_ha_gemini(self.hass)
-            if ok:
-                self._active_model = "ha_gemini"
-                self.api_health = f"Online — Google Gemini (integrazione HA)"
-                self.ai_status = "online"
-                self.last_error = ""
-                self.internet_status = "online"
-                _LOGGER.info("HomeMind: provider HA Gemini OK — %s", msg)
-            else:
-                self._active_model = "ha_gemini"
-                self.api_health = f"Errore — {msg[:80]}"
-                self.ai_status = "error"
-                self.last_error = msg
-                _LOGGER.error("HomeMind: HA Gemini non disponibile — %s", msg)
-            return
-
-        # ----------------------------------------------------------------
-        # Provider: Ollama locale
-        # ----------------------------------------------------------------
-        if self.ai_provider == AI_PROVIDER_OLLAMA:
-            from .ollama_provider import test_ollama
-            session = async_get_clientsession(self.hass)
-            ok, msg = await test_ollama(session, self.ollama_host, self.ollama_model)
-            if ok:
-                self._active_model = self.ollama_model
-                self.api_health = f"Online — Ollama ({self.ollama_model})"
-                self.ai_status = "online"
-                self.last_error = ""
-                _LOGGER.info("HomeMind: Ollama OK — %s", msg)
-            else:
-                self._active_model = self.ollama_model
-                self.api_health = f"Errore Ollama — {msg[:80]}"
-                self.ai_status = "error"
-                self.last_error = msg
-                _LOGGER.error("HomeMind: Ollama non disponibile — %s", msg)
-            return
-
-        # ----------------------------------------------------------------
-        # Provider: Gemini REST diretto
-        # ----------------------------------------------------------------
-        # Step 1: Check internet
-        internet = self._check_internet()
-        if internet is False:
-            self.internet_status = "offline"
-            self.api_health = "Nessuna connessione internet"
-            self.ai_status = "offline"
-            self.last_error = f"HA non ha accesso a internet ({PING_ENTITY} offline)"
-            _LOGGER.error("HomeMind: %s", self.last_error)
-            return
-        self.internet_status = "online" if internet is True else "unknown"
-
-        # Step 2: Testa il modello scelto dall'utente
-        ok, msg = await self._test_gemini_model(self.gemini_model)
-        if ok:
-            self._active_model = self.gemini_model
-            self.api_health = f"Online — {self.gemini_model}"
-            self.ai_status = "online"
-            self.last_error = ""
-            _LOGGER.info("HomeMind: Gemini REST OK con modello '%s'", self.gemini_model)
-            return
-
-        # Step 3: Fallback temporaneo
-        _LOGGER.warning("HomeMind: modello '%s' non disponibile — %s", self.gemini_model, msg)
-        self.last_error = f"Modello '{self.gemini_model}': {msg}"
-
-        fallbacks = [m for m in GEMINI_FALLBACK_ORDER if m != self.gemini_model]
-        fallback_errors: list[str] = [f"{self.gemini_model}: {msg}"]
-
-        for fallback in fallbacks:
-            ok2, msg2 = await self._test_gemini_model(fallback)
-            fallback_errors.append(f"{fallback}: {msg2}")
-            if ok2:
-                self._active_model = fallback
-                self.api_health = f"Fallback — {fallback} (selezionato: {self.gemini_model})"
-                self.ai_status = "online"
-                self.last_error = (
-                    f"Il modello '{self.gemini_model}' non è disponibile. "
-                    f"Uso temporaneamente '{fallback}'. Motivo: {msg}"
-                )
-                _LOGGER.warning("HomeMind: fallback a '%s'", fallback)
-                if self.bot:
-                    self.hass.loop.create_task(
-                        self.bot.send_message(
-                            f"*Avviso modello AI*\n\n"
-                            f"Il modello `{self.gemini_model}` non è disponibile.\n"
-                            f"Uso temporaneamente `{fallback}`.\n\n"
-                            f"Motivo: {msg}\n\n"
-                            f"Cambia provider in Impostazioni → HomeMind AI → Configura."
-                        )
-                    )
-                return
-
-        # Tutti i modelli falliti
-        self._active_model = self.gemini_model
-        self.api_health = "Errore — nessun modello disponibile"
-        self.ai_status = "error"
-        detail = " | ".join(fallback_errors[:3])
-        self.last_error = (
-            f"Nessun modello Gemini disponibile. "
-            f"Prova a usare il provider 'ha_gemini' se hai l'integrazione HA attiva. "
-            f"Dettaglio: {detail}"
-        )
-        _LOGGER.error("HomeMind: nessun modello Gemini disponibile. %s", " | ".join(fallback_errors))
-
-    # ------------------------------------------------------------------ #
-    # Callbacks sensori
-    # ------------------------------------------------------------------ #
+    # ── Callbacks sensori ────────────────────────────────────
 
     def register_sensor_callback(self, callback) -> None:
         self._sensor_callbacks.append(callback)
@@ -492,19 +414,16 @@ class HomeMindCoordinator:
         for cb in self._sensor_callbacks:
             try:
                 cb()
-            except Exception as exc:
-                _LOGGER.debug("Sensor callback errore: %s", exc)
+            except Exception:
+                pass
 
     def _set_error(self, msg: str) -> None:
-        """Aggiorna last_error e notifica i sensori."""
         self.last_error = msg[:200]
         self.ai_status = "error"
         self._notify_sensors()
         _LOGGER.error("HomeMind: %s", msg)
 
-    # ------------------------------------------------------------------ #
-    # Camera discovery
-    # ------------------------------------------------------------------ #
+    # ── Camera discovery ─────────────────────────────────────
 
     async def _get_cameras(self) -> list[str]:
         if self.configured_cameras:
@@ -519,7 +438,6 @@ class HomeMindCoordinator:
         ]
 
     async def _get_all_cameras_raw(self) -> list[str]:
-        """Tutte le camere incluse quelle non supportate (per debug)."""
         if self.configured_cameras:
             return [eid for eid in self.configured_cameras if self.hass.states.get(eid)]
         return list(self.hass.states.async_entity_ids("camera"))
@@ -534,9 +452,7 @@ class HomeMindCoordinator:
                 sensors.append(eid)
         return sensors
 
-    # ------------------------------------------------------------------ #
-    # Night / presence helpers
-    # ------------------------------------------------------------------ #
+    # ── Night / presence ─────────────────────────────────────
 
     def _is_night_window(self) -> bool:
         h = datetime.now().hour
@@ -544,69 +460,62 @@ class HomeMindCoordinator:
             return h >= self.night_start or h < self.night_end
         return self.night_start <= h < self.night_end
 
-    def _everyone_away(self) -> bool:
+    def _is_everyone_home(self) -> bool:
+        """Controlla se qualcuno è a casa. Se person_entity configurato, usa quello.
+        Altrimenti controlla tutte le person entities."""
+        if self.person_entity:
+            state = self.hass.states.get(self.person_entity)
+            if state and state.state in ("home", "Home", "casa"):
+                return True
+            return False
+
         person_ids = self.hass.states.async_entity_ids("person")
         if not person_ids:
             return False
         for eid in person_ids:
             state = self.hass.states.get(eid)
             if state and state.state in ("home", "Home", "casa"):
-                return False
-        return True
+                return True
+        return False
 
-    # ------------------------------------------------------------------ #
-    # Camera snapshot (con cache + rilevamento camere non supportate)
-    # ------------------------------------------------------------------ #
+    def _everyone_away(self) -> bool:
+        return not self._is_everyone_home()
+
+    def _get_interval(self, is_home: bool, is_night: bool) -> int:
+        if is_home and not is_night:
+            return INTERVAL_HOME_DAY
+        if is_home and is_night:
+            return INTERVAL_HOME_NIGHT
+        if not is_home and is_night:
+            return INTERVAL_AWAY_NIGHT
+        return INTERVAL_AWAY_DAY
+
+    # ── Camera snapshot ──────────────────────────────────────
 
     async def _get_camera_snapshot(self, entity_id: str) -> bytes | None:
-        """
-        Scarica snapshot dalla camera usando l'API nativa HA.
-
-        - Salva in cache _last_snapshots per invio foto bot.
-        - Marca come non supportata se ritorna errore persistente.
-        """
         try:
             from homeassistant.components.camera import async_get_image
             image = await async_get_image(self.hass, entity_id, timeout=10)
             if image and image.content and len(image.content) > 500:
                 self._last_snapshots[entity_id] = image.content
                 return image.content
-            # Immagine vuota o troppo piccola → camera non supportata
-            _LOGGER.warning(
-                "HomeMind: camera %s ritorna immagine vuota/non valida — probabilmente una camera virtuale. "
-                "Esclusa dal monitoraggio AI.",
-                entity_id,
-            )
+            _LOGGER.warning("HomeMind: camera %s ritorna immagine vuota — esclusa", entity_id)
             self._unsupported_cameras.add(entity_id)
             return None
         except Exception as exc:
             err_str = str(exc)
             _LOGGER.warning("HomeMind: snapshot %s fallito: %s", entity_id, err_str)
-            # Non marcare come non supportata per errori temporanei di rete
             if "not found" in err_str.lower() or "404" in err_str:
-                _LOGGER.warning(
-                    "HomeMind: camera %s restituisce 404 — camera virtuale o offline. "
-                    "Esclusa dal monitoraggio.",
-                    entity_id,
-                )
                 self._unsupported_cameras.add(entity_id)
             return None
 
-    # ------------------------------------------------------------------ #
-    # Camera analysis
-    # ------------------------------------------------------------------ #
+    # ── Camera analysis ──────────────────────────────────────
 
-    async def analyze_single_camera(self, entity_id: str) -> dict | None:
-        """
-        Analizza una camera con Gemini Vision.
-
-        - Snapshot cached in _last_snapshots per invio bot
-        - Cross-camera correlation
-        - Valutazione contestuale per MEDIUM/HIGH
-        - Alert Telegram con foto
-        """
+    async def analyze_single_camera(
+        self, entity_id: str, force_notify: bool = False
+    ) -> dict | None:
         if self.ai_status == "error":
-            _LOGGER.debug("HomeMind: skip analisi, API in errore")
+            _LOGGER.debug("HomeMind: skip analisi, Ollama in errore")
             return None
 
         image_bytes = await self._get_camera_snapshot(entity_id)
@@ -622,41 +531,20 @@ class HomeMindCoordinator:
         )
 
         try:
-            if self.ai_provider == AI_PROVIDER_HA_GEMINI:
-                from .ha_gemini_provider import analyze_camera_image_ha_gemini
-                analysis = await analyze_camera_image_ha_gemini(
-                    hass=self.hass,
-                    image_bytes=image_bytes,
-                    camera_name=camera_name,
-                )
-            elif self.ai_provider == AI_PROVIDER_OLLAMA:
-                from .ollama_provider import analyze_camera_image_ollama
-                analysis = await analyze_camera_image_ollama(
-                    session=session,
-                    host=self.ollama_host,
-                    model=self._active_model,
-                    image_bytes=image_bytes,
-                    camera_name=camera_name,
-                )
-            else:
-                # Gemini REST diretto
-                analysis = await analyze_camera_image(
-                    session=session,
-                    api_key=self.api_key,
-                    image_bytes=image_bytes,
-                    camera_name=camera_name,
-                    model=self._active_model,
-                )
+            analysis = await analyze_camera_image_ollama(
+                session=session,
+                host=self.ollama_host,
+                model=self.ollama_model,
+                image_bytes=image_bytes,
+                camera_name=camera_name,
+            )
         except Exception as exc:
-            self._set_error(f"AI Vision errore su {camera_name}: {exc}")
+            self._set_error(f"Ollama Vision errore su {camera_name}: {exc}")
             return None
 
-        # Gestione errori API dall'analisi
         if analysis.get("error"):
-            err = analysis["error"]
-            self.last_error = f"{camera_name}: {err}"
+            self.last_error = f"{camera_name}: {analysis['error']}"
             self._notify_sensors()
-            _LOGGER.warning("HomeMind: analisi %s — %s", camera_name, err)
             return analysis
 
         threat_level = analysis.get("threat_level", "none")
@@ -671,52 +559,30 @@ class HomeMindCoordinator:
             (cid, ts) for cid, ts in self._recent_motion_cams
             if now_ts - ts <= self._cross_camera_window
         ]
-
         active_cams = {cid for cid, _ in self._recent_motion_cams}
         if len(active_cams) >= 2 and threat_level in ("low", "none"):
             analysis["threat_level"] = "medium"
             analysis["threat_detected"] = True
             analysis["summary"] = (
-                f"Movimento rilevato su {len(active_cams)} telecamere in 2 minuti. "
+                f"Movimento su {len(active_cams)} telecamere in 2 min. "
                 + analysis.get("summary", "")
             )
             threat_level = "medium"
             threat_detected = True
-            _LOGGER.warning("HomeMind: correlazione cross-camera → escalation medium")
 
-        # Valutazione contestuale AI per MEDIUM/HIGH
+        # Valutazione contestuale per MEDIUM/HIGH
         if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
             from .ha_context import build_home_context
             home_ctx = build_home_context(self.hass, cameras=await self._get_cameras())
             scene_desc = analysis.get("description", "") + " " + analysis.get("summary", "")
-            if self.ai_provider == AI_PROVIDER_HA_GEMINI:
-                from .ha_gemini_provider import ask_ha_gemini_security
-                sec_eval = await ask_ha_gemini_security(
-                    hass=self.hass,
-                    camera_name=camera_name,
-                    scene_description=scene_desc,
-                    home_context=home_ctx,
-                )
-            elif self.ai_provider == AI_PROVIDER_OLLAMA:
-                from .ollama_provider import ask_ollama_security
-                sec_eval = await ask_ollama_security(
-                    session=session,
-                    host=self.ollama_host,
-                    model=self._active_model,
-                    camera_name=camera_name,
-                    scene_description=scene_desc,
-                    home_context=home_ctx,
-                )
-            else:
-                from .ai_provider import ask_gemini_security
-                sec_eval = await ask_gemini_security(
-                    session=session,
-                    api_key=self.api_key,
-                    model=self._active_model,
-                    camera_name=camera_name,
-                    scene_description=scene_desc,
-                    home_context=home_ctx,
-                )
+            sec_eval = await ask_ollama_security(
+                session=session,
+                host=self.ollama_host,
+                model=self.ollama_model,
+                camera_name=camera_name,
+                scene_description=scene_desc,
+                home_context=home_ctx,
+            )
             if sec_eval:
                 analysis["security_evaluation"] = sec_eval
                 if "normale" in sec_eval.lower() and "falso allarme" in sec_eval.lower():
@@ -738,10 +604,23 @@ class HomeMindCoordinator:
             })
             self._notify_sensors()
 
-            if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
+            # Decisione notifica
+            if force_notify:
                 await self._send_security_alert(entity_id, camera_name, analysis, image_bytes)
+            elif threat_level in (THREAT_MEDIUM, THREAT_HIGH):
+                decision = self.notifier.evaluate(
+                    camera_entity=entity_id,
+                    threat_level=threat_level,
+                    is_home=self._is_everyone_home(),
+                    is_night=self._is_night_window(),
+                    analysis=analysis,
+                )
+                if decision.should_notify:
+                    await self._send_security_alert(entity_id, camera_name, analysis, image_bytes)
+                else:
+                    _LOGGER.debug("Notifica soppressa [%s]: %s", entity_id, decision.reason)
 
-        # Evento HA per automazioni
+        # Evento HA
         self.hass.bus.async_fire(
             "homemind_ai_alert",
             {
@@ -756,18 +635,13 @@ class HomeMindCoordinator:
             },
         )
 
-        _LOGGER.info(
-            "HomeMind [%s] rischio=%s | %s",
-            camera_name, threat_level, analysis.get("summary", "")[:80],
-        )
+        _LOGGER.info("HomeMind [%s] rischio=%s | %s", camera_name, threat_level, analysis.get("summary", "")[:80])
         return analysis
 
-    # ------------------------------------------------------------------ #
-    # Monitor loop
-    # ------------------------------------------------------------------ #
+    # ── Monitor loop ─────────────────────────────────────────
 
     async def _monitor_loop(self) -> None:
-        """Loop principale: analisi motion-triggered, digest consolidato, report."""
+        """Loop principale con scheduling adattivo basato su presenza."""
         morning_report_sent_date: str = ""
 
         while True:
@@ -775,7 +649,7 @@ class HomeMindCoordinator:
                 now = datetime.now()
                 now_ts = now.timestamp()
                 in_night = self._is_night_window()
-                everyone_away = self._everyone_away()
+                is_home = self._is_everyone_home()
 
                 # Night mode toggle
                 new_mode = "active" if in_night else "inactive"
@@ -788,11 +662,34 @@ class HomeMindCoordinator:
                             f"Dalle {now.strftime('%H:%M')} — analisi basata su movimento."
                         )
 
-                # Report mattutino
+                # Pulizia notifiche
+                self.notifier.cleanup_stale()
+
+                # Digest aggregato
+                digest_events = self.notifier.get_and_clear_digest()
+                if digest_events and self.bot:
+                    digest_msg = format_digest_message(digest_events)
+                    if digest_msg:
+                        await self.bot.send_message(digest_msg)
+
+                # Report mattutino (solo se eventi rilevanti)
                 today = now.strftime("%Y-%m-%d")
                 if now.hour == self.morning_report_hour and morning_report_sent_date != today:
-                    await self.send_morning_report()
                     morning_report_sent_date = today
+                    threats = [e for e in self.night_events if e.get("threat_level") in (THREAT_MEDIUM, THREAT_HIGH)]
+                    if threats:
+                        await self.send_morning_report()
+                    else:
+                        _LOGGER.info("Morning report: nessun evento rilevante, skip")
+                        self.night_events.clear()
+                        self.alerts_tonight = 0
+
+                # Scheduling adattivo
+                interval = self._get_interval(is_home, in_night)
+                if interval == 0:
+                    # Casa + giorno: nessuna analisi, controlla tra 5 min
+                    await asyncio.sleep(300)
+                    continue
 
                 # Analisi camere — SOLO su motion trigger
                 cameras = await self._get_cameras()
@@ -800,14 +697,14 @@ class HomeMindCoordinator:
 
                 for cam_id in cameras:
                     last_ts = self._last_alert_times.get(cam_id, 0)
-                    if (now_ts - last_ts) < self._alert_cooldown:
+                    cooldown = self.notifier._get_cooldown(is_home, in_night)
+                    if (now_ts - last_ts) < cooldown:
                         continue
 
                     cam_slug = cam_id.replace("camera.", "").lower()
                     motion_triggered = self._is_motion_triggered(cam_id, cam_slug, motion_sensors)
 
-                    # Analizza SOLO se c'è movimento (o casa vuota + notte)
-                    should_analyze = motion_triggered or (everyone_away and in_night)
+                    should_analyze = motion_triggered or (not is_home and in_night)
                     if not should_analyze:
                         continue
 
@@ -818,28 +715,16 @@ class HomeMindCoordinator:
                     has_event = result.get("has_event", False)
                     threat_level = result.get("threat_level", "none")
 
-                    # NESSUN EVENTO → skip, non mandare nulla
                     if not has_event:
                         continue
 
                     if result.get("threat_detected"):
                         self._last_alert_times[cam_id] = now_ts
 
-                    # MEDIUM/HIGH → alert immediato con foto
-                    if threat_level in (THREAT_MEDIUM, THREAT_HIGH):
-                        await self._send_security_alert(
-                            cam_id,
-                            result.get("camera_name", cam_id),
-                            result,
-                            self._last_snapshots.get(cam_id),
-                        )
-                    else:
-                        # LOW/eventi minori → accumula nel digest
+                    # LOW/eventi minori → accumula nel digest
+                    if threat_level not in (THREAT_MEDIUM, THREAT_HIGH):
                         state = self.hass.states.get(cam_id)
-                        cam_name = (
-                            state.attributes.get("friendly_name", cam_id)
-                            if state else cam_id
-                        )
+                        cam_name = state.attributes.get("friendly_name", cam_id) if state else cam_id
                         self._pending_events.append({
                             "time": now.strftime("%H:%M"),
                             "camera_name": cam_name,
@@ -849,25 +734,16 @@ class HomeMindCoordinator:
                             "threat_level": threat_level,
                         })
 
-                # Invia digest consolidato se ci sono eventi pendenti
-                digest_interval = (
-                    self._digest_interval_night if in_night
-                    else self._digest_interval_day
-                )
-                if (
-                    self._pending_events
-                    and (now_ts - self._last_digest_ts) >= digest_interval
-                ):
+                # Digest consolidato
+                digest_interval = self._digest_interval_night if in_night else self._digest_interval_day
+                if self._pending_events and (now_ts - self._last_digest_ts) >= digest_interval:
                     await self._send_digest()
                     self._last_digest_ts = now_ts
 
-                # Aggiorna cameras_online
                 self.cameras_online = len(cameras)
                 self._notify_sensors()
 
-                # Intervallo: 60s notte, 90s casa vuota, 300s normali
-                sleep = 60 if in_night else (90 if everyone_away else 300)
-                await asyncio.sleep(sleep)
+                await asyncio.sleep(interval)
 
             except asyncio.CancelledError:
                 break
@@ -889,12 +765,9 @@ class HomeMindCoordinator:
                 return True
         return False
 
-    # ------------------------------------------------------------------ #
-    # Digest consolidato — un messaggio con tutti gli eventi minori
-    # ------------------------------------------------------------------ #
+    # ── Digest ───────────────────────────────────────────────
 
     async def _send_digest(self) -> None:
-        """Invia un messaggio consolidato con tutti gli eventi pendenti."""
         if not self._pending_events or not self.bot:
             self._pending_events.clear()
             return
@@ -909,8 +782,7 @@ class HomeMindCoordinator:
             + (" · Casa vuota" if everyone_away else ""),
             "",
         ]
-
-        for ev in events[-10:]:  # Max 10 eventi per digest
+        for ev in events[-10:]:
             risk = ev.get("threat_level", "none").upper()
             icon = "🟡" if risk == "LOW" else "⚪"
             cam = ev.get("camera_name", "")
@@ -924,19 +796,12 @@ class HomeMindCoordinator:
             lines.append("")
 
         lines.append(f"Telecamere: {self.cameras_online} attive")
-
         await self.bot.send_message("\n".join(lines))
 
-    # ------------------------------------------------------------------ #
-    # Alert sicurezza (Apple-minimal)
-    # ------------------------------------------------------------------ #
+    # ── Alert sicurezza ──────────────────────────────────────
 
     async def _send_security_alert(
-        self,
-        entity_id: str,
-        camera_name: str,
-        analysis: dict,
-        image_bytes: bytes | None = None,
+        self, entity_id: str, camera_name: str, analysis: dict, image_bytes: bytes | None = None,
     ) -> None:
         if not self.bot:
             return
@@ -945,7 +810,6 @@ class HomeMindCoordinator:
         everyone_away = self._everyone_away()
         ts = datetime.now().strftime("%H:%M")
 
-        # Header minimale
         risk_label = "ALTO" if level == "high" else "MEDIO"
         header = f"{'🔴' if level == 'high' else '🟠'} *Allerta · {camera_name}*"
         if everyone_away:
@@ -953,8 +817,7 @@ class HomeMindCoordinator:
 
         body = f"{analysis.get('description', '')}".strip()
         if analysis.get("unusual") and analysis["unusual"].lower() not in ("no", "nessuno", "nessuna"):
-            body += f" {analysis['unusual']}".rstrip(".")
-            body += "."
+            body += f" {analysis['unusual']}".rstrip(".") + "."
         summary = analysis.get("summary", "")
 
         caption = f"{header}\n{ts} · Rischio {risk_label}"
@@ -970,20 +833,22 @@ class HomeMindCoordinator:
         else:
             await self.bot.send_message(caption)
 
-    # ------------------------------------------------------------------ #
-    # Report mattutino (Apple-minimal)
-    # ------------------------------------------------------------------ #
+    # ── Morning report ───────────────────────────────────────
 
     async def send_morning_report(self, force: bool = False) -> None:
         events = self.night_events
         threats = [e for e in events if e.get("threat_level") in (THREAT_MEDIUM, THREAT_HIGH)]
-        today = datetime.now().strftime("%d/%m/%Y")
 
+        if not force and not threats:
+            return
+
+        today = datetime.now().strftime("%d/%m/%Y")
         lines = [
             f"*Report Notturno · {today}*",
             "",
             f"Analisi  {len(events)}",
             f"Allerte  {len(threats)}",
+            f"Internet  {self.internet_status}",
             "",
         ]
 
@@ -995,7 +860,9 @@ class HomeMindCoordinator:
                 cam = e.get("camera_name") or e.get("camera", "").replace("camera.", "").replace("_", " ").title()
                 lines.append(f"{icon} {e['time']} · {cam}: {e.get('summary', '')}")
         else:
-            lines.append("Nessun evento sospetto rilevato stanotte.")
+            lines.append("Nessun evento sospetto stanotte.")
+
+        lines.append("\n_HomeMind AI v4 — 100% locale con Ollama_")
 
         report_text = "\n".join(lines)
         self.last_report = report_text[:255]

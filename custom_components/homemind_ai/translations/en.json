@@ -2,60 +2,55 @@
   "config": {
     "step": {
       "user": {
-        "title": "HomeMind AI — Provider AI e Telegram",
-        "description": "Scegli il provider AI. Usa 'ha_gemini' se hai gia l'integrazione Google Generative AI in HA (consigliato).",
+        "title": "HomeMind AI — Ollama & Telegram",
+        "description": "Configure HomeMind AI with local AI (Ollama). Zero cost, no API key required.",
         "data": {
-          "ai_provider": "Provider AI (ha_gemini / gemini / ollama)",
-          "gemini_api_key": "Gemini API Key (solo provider 'gemini')",
-          "gemini_model": "Modello Gemini (solo provider 'gemini')",
-          "ollama_host": "Ollama Host (es. http://localhost:11434)",
-          "ollama_model": "Modello Ollama (es. llava)",
-          "telegram_token": "Telegram Bot Token (opzionale)",
-          "telegram_chat_id": "Telegram Chat ID (opzionale)"
+          "ollama_host": "Ollama address (e.g. http://localhost:11434)",
+          "ollama_model": "Ollama Model",
+          "person_entity": "Person entity for home/away (e.g. person.francesco)",
+          "telegram_token": "Telegram Bot Token (optional)",
+          "telegram_chat_id": "Telegram Chat ID (optional)"
         }
       },
       "cameras": {
-        "title": "HomeMind AI — Telecamere, Sensori e Targhe",
-        "description": "Seleziona le telecamere, i sensori di movimento e, opzionalmente, le entita ALPR per il riconoscimento targhe.",
+        "title": "HomeMind AI — Cameras, Sensors & Plates",
+        "description": "Select cameras, motion sensors and optionally ALPR entities for license plate recognition.",
         "data": {
-          "cameras": "Telecamere da monitorare",
-          "motion_sensors": "Sensori di movimento",
-          "vehicle_sensors": "Sensori veicolo (triggrano ALPR)",
-          "alpr_entities": "Entita PlateRecognizer (image_processing)",
-          "night_start": "Inizio monitoraggio notturno (ora 0-23)",
-          "night_end": "Fine monitoraggio notturno (ora 0-23)",
-          "morning_report_hour": "Ora report mattutino (ora 0-23)"
+          "cameras": "Cameras to monitor",
+          "motion_sensors": "Motion sensors",
+          "vehicle_sensors": "Vehicle sensors (trigger ALPR)",
+          "alpr_entities": "PlateRecognizer entities (image_processing)",
+          "night_start": "Night monitoring start hour (0-23)",
+          "night_end": "Night monitoring end hour (0-23)",
+          "morning_report_hour": "Morning report hour (0-23)"
         }
       }
     },
     "error": {
-      "api_key_required": "La Gemini API Key e obbligatoria per il provider 'gemini'.",
-      "ollama_host_required": "L'indirizzo Ollama e obbligatorio per il provider 'ollama'."
+      "ollama_connection_failed": "Cannot connect to Ollama. Make sure it is running and the address is correct."
     },
     "abort": {
-      "already_configured": "HomeMind AI e gia configurato."
+      "already_configured": "HomeMind AI is already configured."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "HomeMind AI — Opzioni",
-        "description": "Usa 'ha_gemini' per evitare conflitti se Google Generative AI e gia configurato in HA.",
+        "title": "HomeMind AI — Options",
+        "description": "Modify HomeMind AI settings. Local AI with Ollama, zero cost.",
         "data": {
-          "ai_provider": "Provider AI",
-          "gemini_api_key": "Gemini API Key",
-          "gemini_model": "Modello Gemini",
-          "ollama_host": "Ollama Host",
-          "ollama_model": "Modello Ollama",
+          "ollama_host": "Ollama address",
+          "ollama_model": "Ollama Model",
+          "person_entity": "Person entity for home/away",
           "telegram_token": "Telegram Bot Token",
           "telegram_chat_id": "Telegram Chat ID",
-          "cameras": "Telecamere da monitorare",
-          "motion_sensors": "Sensori di movimento",
-          "vehicle_sensors": "Sensori veicolo (ALPR trigger)",
-          "alpr_entities": "Entita PlateRecognizer",
-          "night_start": "Inizio monitoraggio notturno (ora 0-23)",
-          "night_end": "Fine monitoraggio notturno (ora 0-23)",
-          "morning_report_hour": "Ora report mattutino (ora 0-23)"
+          "cameras": "Cameras to monitor",
+          "motion_sensors": "Motion sensors",
+          "vehicle_sensors": "Vehicle sensors (ALPR trigger)",
+          "alpr_entities": "PlateRecognizer entities",
+          "night_start": "Night monitoring start hour (0-23)",
+          "night_end": "Night monitoring end hour (0-23)",
+          "morning_report_hour": "Morning report hour (0-23)"
         }
       }
     }

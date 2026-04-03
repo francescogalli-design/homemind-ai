@@ -1,7 +1,7 @@
 analyze_camera:
   name: Analizza Camera
   description: >
-    Analizza una camera specifica con Gemini Vision AI.
+    Analizza una camera specifica con AI locale (Ollama).
     Invia alert Telegram se viene rilevata una minaccia.
   fields:
     entity_id:
@@ -16,16 +16,16 @@ generate_report:
   name: Genera Report Sicurezza
   description: >
     Genera e invia il report di sicurezza notturno via Telegram.
-    Include tutti gli eventi della notte e lo stato attuale della casa.
+    Inviato solo se ci sono stati eventi rilevanti, a meno che forzato.
 
 clear_alerts:
   name: Azzera Alert
-  description: Cancella la coda degli alert notturni e azzera il contatore.
+  description: Cancella la coda degli alert notturni, azzera contatore e resetta notifiche.
 
 ask_ai:
   name: Chiedi all'AI
   description: >
-    Invia una domanda all'AI con il contesto completo della casa.
+    Invia una domanda all'AI locale (Ollama) con il contesto completo della casa.
     La risposta viene inviata via Telegram e salvata nel sensore last_ai_answer.
   fields:
     question:
@@ -35,3 +35,18 @@ ask_ai:
       example: "Chi c'è in casa? Le luci sono accese?"
       selector:
         text:
+
+validate_plate:
+  name: Verifica Targa
+  description: >
+    Pre-validazione ALPR: controlla con AI locale se c'è una targa
+    visibile nell'immagine prima di chiamare PlateRecognizer.
+    Pubblica evento homemind_plate_check con plate_visible true/false.
+  fields:
+    entity_id:
+      name: Camera
+      description: Entità camera da controllare
+      required: true
+      selector:
+        entity:
+          domain: camera

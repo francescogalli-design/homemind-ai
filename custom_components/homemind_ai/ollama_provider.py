@@ -1,6 +1,7 @@
-"""Ollama provider — analisi immagini e query AI via Ollama locale."""
+"""Ollama provider — analisi immagini e query AI via Ollama locale (100% gratuito)."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any
@@ -9,8 +10,11 @@ import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
+# Semaforo: una sola inferenza vision alla volta per non sovraccaricare
+_VISION_SEMAPHORE = asyncio.Semaphore(1)
+
 # Modelli con supporto vision consigliati
-OLLAMA_VISION_MODELS_HINT = ["llava", "llava-phi3", "moondream", "bakllava", "llava:13b"]
+OLLAMA_VISION_MODELS_HINT = ["llava", "llava-phi3", "moondream", "moondream2", "bakllava", "llava:13b"]
 
 
 async def test_ollama(
@@ -100,23 +104,27 @@ async def analyze_camera_image_ollama(
         "options": {"temperature": 0.3},
     }
 
-    try:
-        async with session.post(
-            f"{host}/api/chat",
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=60),
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                _LOGGER.error("Ollama Vision errore HTTP %s: %s", resp.status, body[:200])
-                return _error_result(camera_name, f"HTTP {resp.status}: {body[:100]}")
+    async with _VISION_SEMAPHORE:
+        try:
+            async with session.post(
+                f"{host}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=90),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    _LOGGER.error("Ollama Vision errore HTTP %s: %s", resp.status, body[:200])
+                    return _error_result(camera_name, f"HTTP {resp.status}: {body[:100]}")
 
-            data = await resp.json()
-            raw_text = data.get("message", {}).get("content", "").strip()
+                data = await resp.json()
+                raw_text = data.get("message", {}).get("content", "").strip()
 
-    except Exception as exc:
-        _LOGGER.error("Ollama Vision eccezione: %s", exc)
-        return _error_result(camera_name, str(exc))
+        except asyncio.TimeoutError:
+            _LOGGER.error("Ollama Vision timeout (90s) per %s", camera_name)
+            return _error_result(camera_name, "Timeout 90s")
+        except Exception as exc:
+            _LOGGER.error("Ollama Vision eccezione: %s", exc)
+            return _error_result(camera_name, str(exc))
 
     return _parse_response(raw_text, camera_name)
 
@@ -255,6 +263,54 @@ def _parse_response(raw: str, camera_name: str) -> dict[str, Any]:
         result["summary"] = raw[:150]
 
     return result
+
+
+async def check_plate_visible(
+    session: aiohttp.ClientSession,
+    host: str,
+    model: str,
+    image_bytes: bytes,
+) -> bool:
+    """
+    Pre-validazione ALPR: verifica se c'è una targa leggibile nell'immagine.
+    Restituisce True/False. Usato PRIMA di chiamare PlateRecognizer per
+    risparmiare chiamate API a pagamento.
+    """
+    host = host.rstrip("/")
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Is there a visible and readable license plate in this image? Answer ONLY: YES or NO",
+                "images": [image_b64],
+            }
+        ],
+        "stream": False,
+        "options": {"temperature": 0.0, "num_predict": 5},
+    }
+
+    async with _VISION_SEMAPHORE:
+        try:
+            async with session.post(
+                f"{host}/api/chat",
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("Ollama plate-check fallito HTTP %s", resp.status)
+                    return True  # in dubbio, procedi con PlateRecognizer
+
+                data = await resp.json()
+                answer = data.get("message", {}).get("content", "").strip().upper()
+
+        except Exception as exc:
+            _LOGGER.warning("Ollama plate-check eccezione: %s", exc)
+            return True  # in dubbio, procedi
+
+    return "YES" in answer or "SI" in answer or "SÌ" in answer
 
 
 def _error_result(camera_name: str, error: str) -> dict[str, Any]:

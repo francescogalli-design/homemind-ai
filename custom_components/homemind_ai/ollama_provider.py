@@ -83,12 +83,8 @@ async def analyze_camera_image_ollama(
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     prompt = (
-        f"Telecamera sicurezza '{camera_name}'. Analizza SOLO eventi rilevanti.\n"
-        "Se la scena è normale (nessuna persona, veicolo, animale o oggetto insolito): rispondi SOLO \"NESSUN EVENTO\"\n"
-        "Se c'è un evento, rispondi con questo formato esatto:\n"
-        "EVENTO: [cosa succede — max 1 riga]\n"
-        "RISCHIO: [NESSUNO/BASSO/MEDIO/ALTO]\n"
-        "NOTA: [perché è rilevante — max 1 riga]"
+        f"Camera: {camera_name}. What do you see? If nothing unusual: reply ONLY \"NESSUN EVENTO\".\n"
+        "If something notable, reply:\nEVENTO: [what]\nRISCHIO: [NESSUNO/BASSO/MEDIO/ALTO]\nNOTA: [why]"
     )
 
     payload = {
@@ -101,7 +97,7 @@ async def analyze_camera_image_ollama(
             }
         ],
         "stream": False,
-        "options": {"temperature": 0.3},
+        "options": {"temperature": 0.3, "num_predict": 128},
     }
 
     async with _VISION_SEMAPHORE:
@@ -109,7 +105,7 @@ async def analyze_camera_image_ollama(
             async with session.post(
                 f"{host}/api/chat",
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=90),
+                timeout=aiohttp.ClientTimeout(total=180),
             ) as resp:
                 if resp.status != 200:
                     body = await resp.text()
@@ -120,8 +116,8 @@ async def analyze_camera_image_ollama(
                 raw_text = data.get("message", {}).get("content", "").strip()
 
         except asyncio.TimeoutError:
-            _LOGGER.error("Ollama Vision timeout (90s) per %s", camera_name)
-            return _error_result(camera_name, "Timeout 90s")
+            _LOGGER.error("Ollama Vision timeout (180s) per %s", camera_name)
+            return _error_result(camera_name, "Timeout 180s")
         except Exception as exc:
             _LOGGER.error("Ollama Vision eccezione: %s", exc)
             return _error_result(camera_name, str(exc))
